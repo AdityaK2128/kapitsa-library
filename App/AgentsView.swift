@@ -63,7 +63,7 @@ struct AgentsView: View {
 
     private var binOnPath: Bool {
         let bin = Kapitsa.commandURL.deletingLastPathComponent().path
-        return Kapitsa.loginPath.split(separator: ":").map(String.init).contains(bin)
+        return Kapitsa.shellPath.split(separator: ":").map(String.init).contains(bin)
     }
 
     private var terminalCard: some View {
@@ -99,7 +99,7 @@ struct AgentsView: View {
             Label("API Endpoints", systemImage: "link").font(.headline)
             CopyRow(label: "OpenAI Base URL", value: "http://127.0.0.1:\(server.port)/v1")
             CopyRow(label: "Anthropic Base URL", value: "http://127.0.0.1:\(server.port)")
-            CopyRow(label: "API Key", value: Prefs.apiKey.isEmpty ? "local" : Prefs.apiKey)
+            CopyRow(label: "API Key", value: server.apiKey.isEmpty ? "local" : server.apiKey)
             CopyRow(label: "Model ID", value: server.record?.apiId)
         }.frame(minHeight: 170, alignment: .top).card()
     }

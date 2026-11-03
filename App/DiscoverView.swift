@@ -144,6 +144,7 @@ private struct HuggingFaceSection: View {
 private struct HuggingFaceRow: View {
     let model: HuggingFace.Model
     @ObservedObject var downloads = Downloads.shared
+    @ObservedObject var store = AppStore.shared
     @State private var details: HuggingFace.Details?
     @State private var checking = false
 
@@ -195,8 +196,14 @@ private struct HuggingFaceRow: View {
         case .failed?:
             Button("Retry") { downloads.start(model.id, title: model.id, expectedBytes: expected) }
         default:
-            if job?.state == .finished || FileManager.default.fileExists(atPath: folder.appendingPathComponent("config.json").path) {
+            // The folder may hold an MLX model or GGUF files; either counts once the scan finds it usable.
+            let usable = store.models.contains { ($0.path == folder.path || $0.path.hasPrefix(folder.path + "/")) && $0.available }
+            if job?.state == .finished || usable {
                 Label("Downloaded", systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(.green)
+            } else if FileManager.default.fileExists(atPath: folder.path) {
+                // An unfinished download from an earlier session: its job is gone, its files remain.
+                Button("Resume") { downloads.start(model.id, title: model.id, expectedBytes: expected) }
+                    .help("This download didn’t finish; resume it")
             } else if let details {
                 Button("Download") { downloads.start(model.id, title: model.id, expectedBytes: details.bytes) }
                     .disabled(details.problem != nil)

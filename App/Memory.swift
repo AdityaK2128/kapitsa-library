@@ -33,11 +33,10 @@ enum SystemMemory {
         return sysctlbyname("vm.swapusage", &usage, &size, nil, 0) == 0 ? Double(usage.xsu_used) / 1_073_741_824 : 0
     }
 
-    /// GPU memory Kapitsa may hold: what other apps leave less a reserve, but never below 60% of RAM, since
-    /// macOS compresses idle app memory and Kapitsa maps weights from disk; never above Kapitsa's own ceiling
-    /// (Metal's recommended working set, about 94% of RAM).
+    /// GPU memory Kapitsa may hold with Memory Protection on: what other apps leave, less the reserve, and
+    /// never above Kapitsa's own ceiling (Metal's recommended working set, about 94% of RAM).
     static func safeBudgetGB(margin: Double = Prefs.memoryMargin) -> Double {
-        let budget = min(max(availableGB() - margin, totalGB * 0.6), totalGB * 0.9)
+        let budget = max(0, min(availableGB() - margin, totalGB * 0.9))
         return (budget * 10).rounded(.down) / 10
     }
 
@@ -59,7 +58,7 @@ enum SystemMemory {
     static func folderWeightsGB(_ path: String) -> Double {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
         return names.filter { $0.hasSuffix(".safetensors") && !$0.hasPrefix(".") }.reduce(0.0) { total, name in
-            total + Double((try? FileManager.default.attributesOfItem(atPath: path + "/" + name)[.size] as? NSNumber)?.int64Value ?? 0) / 1_073_741_824
+            total + Double(FileManager.default.sizeFollowingLinks(atPath: path + "/" + name)) / 1_073_741_824
         }
     }
 

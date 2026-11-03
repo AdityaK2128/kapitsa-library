@@ -116,14 +116,19 @@ enum Kapitsa {
         }?.replacingOccurrences(of: "[kapitsa] ", with: "")
     }
 
-    /// The user's login-shell PATH, so agents installed by npm, Homebrew or pipx are found from the GUI.
-    static let loginPath: String = {
+    /// The PATH the user's own terminal gets from their login shell, as it is.
+    static let shellPath: String = {
         let fallback = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         let result = try? runSync("/bin/zsh", ["-lc", "print -rn -- $PATH"], timeout: 5)
+        return (result?.code == 0 ? result?.output : nil).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+    }()
+
+    /// The login-shell PATH plus the usual install folders, so agents installed by npm, Homebrew or pipx are
+    /// found from the GUI.
+    static let loginPath: String = {
         let extras = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
                       "/opt/homebrew/bin", "/usr/local/bin"]
-        let found = (result?.code == 0 ? result?.output : nil).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
-        return (found.split(separator: ":").map(String.init) + extras).reduce(into: [String]()) {
+        return (shellPath.split(separator: ":").map(String.init) + extras).reduce(into: [String]()) {
             if !$0.contains($1) { $0.append($1) }
         }.joined(separator: ":")
     }()
@@ -270,17 +275,19 @@ enum Kapitsa {
         process.standardOutput = pipe
         process.standardError = pipe
         process.standardInput = FileHandle.nullDevice
+        // The deadline covers the process itself, not only its output: a child can close its pipes and keep running.
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         try process.run()
         let deadline = DispatchTime.now() + timeout
         let reader = DispatchQueue.global()
         var data = Data()
         let done = DispatchSemaphore(value: 0)
         reader.async { data = pipe.fileHandleForReading.readDataToEndOfFile(); done.signal() }
-        if done.wait(timeout: deadline) == .timedOut {
+        if done.wait(timeout: deadline) == .timedOut || exited.wait(timeout: deadline) == .timedOut {
             process.terminate()
             throw Failure(errorDescription: "\(URL(fileURLWithPath: executable).lastPathComponent) \(arguments.first ?? "") timed out")
         }
-        process.waitUntilExit()
         return Output(code: process.terminationStatus, output: String(decoding: data, as: UTF8.self))
     }
 

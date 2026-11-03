@@ -227,7 +227,7 @@ private struct ConnectCard: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("API Endpoint", systemImage: "link").font(.headline)
             CopyRow(label: "Base URL", value: "http://127.0.0.1:\(server.port)/v1")
-            CopyRow(label: "API Key", value: Prefs.apiKey.isEmpty ? "local" : Prefs.apiKey)
+            CopyRow(label: "API Key", value: server.apiKey.isEmpty ? "local" : server.apiKey)
             CopyRow(label: "Model ID", value: server.record?.apiId)
             Text("OpenAI and Anthropic compatible: Chat Completions, Responses and Messages.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

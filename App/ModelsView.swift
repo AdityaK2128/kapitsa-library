@@ -132,6 +132,7 @@ private struct ModelDetail: View {
     private var loadCard: some View {
         let need = SystemMemory.estimatedNeedGB(model)
         let fit = SystemMemory.fit(needGB: need)
+        let warns = fit == .tight || (fit == .reclaims && Prefs.protectMemory)
         return VStack(alignment: .leading, spacing: 14) {
             // The action sits beside the title and the context control on its own row, so neither is
             // squeezed at narrow window widths.
@@ -142,7 +143,8 @@ private struct ModelDetail: View {
                     Button("Stop", role: .destructive) { server.stop() }.controlSize(.large)
                 } else {
                     Button { store.load(model) } label: { Label("Load Model", systemImage: "play.fill") }
-                        .buttonStyle(.borderedProminent).controlSize(.large).disabled(server.running || relocating)
+                        .buttonStyle(.borderedProminent).controlSize(.large).disabled(server.running || relocating || bench.running != nil)
+                        .help(bench.running != nil ? "A benchmark is running" : "")
                 }
             }
             HStack(spacing: 14) {
@@ -157,11 +159,12 @@ private struct ModelDetail: View {
             Label(String(format: "Estimated memory: %.0f GB of %.0f GB", need, SystemMemory.totalGB) + {
                 switch fit {
                 case .comfortable: return ""
-                case .reclaims: return "  ·  macOS will compress idle app memory to make room"
+                case .reclaims: return Prefs.protectMemory ? "  ·  More than is free now: close apps, or turn off Memory Protection in Settings"
+                                                           : "  ·  macOS will compress idle app memory to make room"
                 case .tight: return "  ·  May not fit on this Mac"
                 }
-            }(), systemImage: fit == .tight ? "exclamationmark.triangle" : "memorychip")
-                .font(.caption).foregroundStyle(fit == .tight ? .orange : .secondary)
+            }(), systemImage: warns ? "exclamationmark.triangle" : "memorychip")
+                .font(.caption).foregroundStyle(warns ? .orange : .secondary)
             if isLoaded, let usable = server.stats.usableContext {
                 let limited = usable < (server.stats.context ?? usable)
                 Label("Usable context: \(usable.formatted()) tokens" +
@@ -235,10 +238,12 @@ private struct ModelDetail: View {
                     }
                     HStack(spacing: 10) {
                         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: model.path)]) }
+                        let busy = store.busyReason(model)
                         Button("Move To…") { store.relocate(model) }
-                            .disabled(isLoaded || relocating)
-                            .help(isLoaded ? "Stop the model before moving it" : "Move this model to another folder or drive; it stays in your library")
-                        Button("Move to Trash…", role: .destructive) { confirmDelete = true }.disabled(isLoaded || relocating)
+                            .disabled(busy != nil)
+                            .help(busy ?? "Move this model to another folder or drive; it stays in your library")
+                        Button("Move to Trash…", role: .destructive) { confirmDelete = true }
+                            .disabled(busy != nil).help(busy ?? "")
                     }
                 }
             }

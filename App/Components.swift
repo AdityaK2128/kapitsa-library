@@ -330,7 +330,8 @@ struct VariantAction: View {
             case .failed?:
                 action("Retry", symbol: "arrow.clockwise.circle.fill")
             default:
-                if let model = store.localModel(for: variant) {
+                // Download jobs live only in memory; after a restart an unfinished folder is found by the scan.
+                if let model = store.localModel(for: variant), model.loadable {
                     HStack(spacing: 8) {
                         Label("Downloaded", systemImage: "checkmark.circle.fill").labelStyle(.iconOnly).foregroundStyle(.green)
                             .help("Downloaded")
@@ -338,6 +339,8 @@ struct VariantAction: View {
                             store.load(model, context: model.contexts.contains("64k") ? "64k" : nil)
                         }.disabled(store.server.running)
                     }
+                } else if store.localModel(for: variant) != nil {
+                    action("Resume", symbol: "arrow.clockwise.circle.fill").help("This download didn’t finish; resume it")
                 } else {
                     action("Download", symbol: "arrow.down.circle.fill")
                 }
@@ -455,12 +458,19 @@ struct ImportSheet: View {
     }
 
     func convert() {
-        let target = Kapitsa.downloads.appendingPathComponent(name).path
-        try? conversion.start(["import", model.path, "--name", name]) { code in
-            Task {
-                await AppStore.shared.scan()
-                if code == 0 { AppStore.shared.selectedModelID = ModelScanner.identity(target) }
+        let target = Kapitsa.downloads.appendingPathComponent(name).path, source = model.path
+        AppStore.shared.converting.insert(source)
+        do {
+            try conversion.start(["import", source, "--name", name]) { code in
+                Task {
+                    AppStore.shared.converting.remove(source)
+                    await AppStore.shared.scan()
+                    if code == 0 { AppStore.shared.selectedModelID = ModelScanner.identity(target) }
+                }
             }
+        } catch {
+            AppStore.shared.converting.remove(source)
+            preview = error.localizedDescription
         }
     }
 }

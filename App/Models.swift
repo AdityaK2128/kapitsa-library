@@ -98,7 +98,7 @@ enum ModelScanner {
         let fm = FileManager.default
         if url.pathExtension.lowercased() == "gguf" {
             row.format = "GGUF"
-            row.size = ((try? fm.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
+            row.size = fm.sizeFollowingLinks(atPath: url.path)
             let lower = url.lastPathComponent.lowercased()
             if lower.contains("mmproj") || lower.contains("imatrix") {
                 row.status = .companion
@@ -120,9 +120,7 @@ enum ModelScanner {
         row.architecture = config["model_type"] as? String ?? "unknown"
         let files = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
         let weights = files.filter { $0.hasSuffix(".safetensors") && !$0.hasPrefix(".") }
-        row.size = weights.reduce(Int64(0)) { total, name in
-            total + (((try? fm.attributesOfItem(atPath: url.appendingPathComponent(name).path)[.size]) as? NSNumber)?.int64Value ?? 0)
-        }
+        row.size = weights.reduce(Int64(0)) { total, name in total + fm.sizeFollowingLinks(atPath: url.appendingPathComponent(name).path) }
         let classes = (config["architectures"] as? [String]) ?? []
         if classes.contains(where: { $0.contains("Draft") }) || url.lastPathComponent.lowercased().contains("dflash") {
             row.status = .companion
@@ -222,12 +220,24 @@ enum ModelScanner {
 }
 
 /// Reads a GGUF file's general.architecture without touching tensor data.
+extension FileManager {
+    /// A file's size, measured at the target when the path is a symbolic link (weights are often linked in).
+    func sizeFollowingLinks(atPath path: String) -> Int64 {
+        let target = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        return ((try? attributesOfItem(atPath: target)[.size]) as? NSNumber)?.int64Value ?? 0
+    }
+}
+
 enum GGUFHeader {
     struct Failure: LocalizedError { let errorDescription: String? }
 
     static func architecture(of url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
+        // Every length and count below comes from the file, so arithmetic is checked and seeks stay inside it.
+        let length = try handle.seekToEnd()
+        try handle.seek(toOffset: 0)
+        let invalid = Failure(errorDescription: "Invalid GGUF metadata")
         func bytes(_ count: Int) throws -> Data {
             let data = try handle.read(upToCount: count) ?? Data()
             if data.count != count { throw Failure(errorDescription: "Incomplete GGUF header") }
@@ -235,7 +245,11 @@ enum GGUFHeader {
         }
         func u32() throws -> UInt32 { try bytes(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian }
         func u64() throws -> UInt64 { try bytes(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.littleEndian }
-        func skip(_ count: UInt64) throws { try handle.seek(toOffset: try handle.offset() + count) }
+        func skip(_ count: UInt64) throws {
+            let (target, overflow) = try handle.offset().addingReportingOverflow(count)
+            guard !overflow, target <= length else { throw invalid }
+            try handle.seek(toOffset: target)
+        }
         func string(keep: Bool = true) throws -> String {
             let size = try u64()
             if size > 128 * 1024 * 1024 { throw Failure(errorDescription: "Invalid GGUF metadata length") }
@@ -248,7 +262,11 @@ enum GGUFHeader {
             case 8: _ = try string(keep: false)
             case 9:
                 let subtype = try u32(), count = try u64()
-                if let size = sizes[subtype] { try skip(size * count) }
+                if let size = sizes[subtype] {
+                    let (total, overflow) = size.multipliedReportingOverflow(by: count)
+                    guard !overflow else { throw invalid }
+                    try skip(total)
+                }
                 else if subtype == 8 && count < 1_000_000 { for _ in 0..<count { _ = try string(keep: false) } }
                 else { throw Failure(errorDescription: "Unsupported GGUF metadata array") }
             default:

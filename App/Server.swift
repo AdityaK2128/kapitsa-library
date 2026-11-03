@@ -37,6 +37,8 @@ struct LogStats {
     /// The context a conversation can actually use: Kapitsa's fit, else the configured context.
     var effectiveContext: Int? { usableContext.map { min($0, context ?? $0) } ?? context }
     var requests: [RequestStat] = []
+    /// Request IDs keep counting after old rows drop off the 50-row history.
+    private var nextID = 1
     var outputTokens = 0
     var decodeTokens = 0
     var decodeMs = 0.0
@@ -58,25 +60,29 @@ struct LogStats {
         }
     }
 
-    mutating func consume(_ line: String) {
-        guard !line.isEmpty else { return }
+    /// Reads one log line; true when it was a finished request.
+    @discardableResult
+    mutating func consume(_ line: String) -> Bool {
+        guard !line.isEmpty else { return false }
         lastLine = line
         if let g = Self.groups(Self.engine, line) { model = g[0]; context = Int(g[1]); decoding = g[2] }
         if let g = Self.groups(Self.memory, line) { allocated = g[0]; budget = g[1] }
         if let g = Self.groups(Self.fit, line) { usableContext = Int(g[0]) }
         if let g = Self.groups(Self.perToken, line) { kvPerTokenKB = Int(g[0]) }
         if let range = line.range(of: "drafter: ") { drafter = String(line[range.upperBound...].prefix { $0 != "(" }).trimmingCharacters(in: .whitespaces) }
-        guard let g = Self.groups(Self.request, line) else { return }
-        let stat = RequestStat(id: requests.count + 1, prompt: Int(g[0]) ?? 0, cached: Int(g[1]) ?? 0,
+        guard let g = Self.groups(Self.request, line) else { return false }
+        let stat = RequestStat(id: nextID, prompt: Int(g[0]) ?? 0, cached: Int(g[1]) ?? 0,
                                prefillMs: Double(g[2]), output: Int(g[3]) ?? 0, decodeMs: Double(g[4]) ?? 0,
                                tokensPerSecond: Double(g[5]) ?? 0, finish: g[6].trimmingCharacters(in: .whitespaces),
                                draftYield: Self.groups(Self.cycle, line).flatMap { Double($0[0]) })
+        nextID += 1
         requests.append(stat)
         if requests.count > 50 { requests.removeFirst() }
         outputTokens += stat.output
         // Kapitsa's decode interval starts after the first output token.
         decodeTokens += max(0, stat.output - 1)
         decodeMs += stat.decodeMs
+        return true
     }
 }
 
@@ -177,6 +183,8 @@ struct ServerRecord: Codable {
     var port: Int
     var log: String
     var offset: UInt64 = 0
+    /// The key the server was started with; it stays in force until the next load.
+    var apiKey: String?
 }
 
 @MainActor
@@ -218,8 +226,15 @@ final class ServerController: ObservableObject {
         }
     }
 
+    /// The key clients must send: the one the running server started with, else the current setting.
+    var apiKey: String { record?.apiKey ?? Prefs.apiKey }
+
     func start(_ model: LocalModel, context: String) throws {
         guard !running else { throw Kapitsa.Failure(errorDescription: "A model is already running. Stop it before loading another.") }
+        // A benchmark runs its own server; two models at once would defeat both memory checks and the measurement.
+        guard BenchmarkRunner.shared.running == nil else {
+            throw Kapitsa.Failure(errorDescription: "A benchmark is running. Wait for it to finish or cancel it before loading a model.")
+        }
         guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
         if let problem = Kapitsa.storageProblem() { throw Kapitsa.Failure(errorDescription: problem) }
         let port = Prefs.port
@@ -231,10 +246,14 @@ final class ServerController: ObservableObject {
                          "--port", String(port), "--context", context, "--slots", String(Prefs.slots),
                          "--disk-cache", Prefs.diskCache]
         if !Prefs.shareOnNetwork { arguments.append("--private") }
-        if !Prefs.apiKey.isEmpty { arguments += ["--api-key", Prefs.apiKey] }
+        let key = Prefs.apiKey
+        if !key.isEmpty { arguments += ["--api-key", key] }
         if Prefs.protectMemory {
-            let budget = SystemMemory.safeBudgetGB()
+            let budget = SystemMemory.safeBudgetGB(), need = SystemMemory.estimatedNeedGB(model)
             if budget < 2 { throw Kapitsa.Failure(errorDescription: "Insufficient memory: less than 2 GB available. Close other apps and try again.") }
+            if need > budget {
+                throw Kapitsa.Failure(errorDescription: String(format: "Not enough free memory: %@ needs about %.0f GB and %.0f GB is free now, keeping %.0f GB for other apps. Close some apps, or turn off Memory Protection in Settings › Memory.", model.name, need, budget, Prefs.memoryMargin))
+            }
             arguments += ["--mem-budget", String(format: "%.1f", budget)]
         }
         if !model.drafter.isEmpty { arguments += ["--dflash", Kapitsa.loadPath(for: model.drafter)] }
@@ -281,7 +300,7 @@ final class ServerController: ObservableObject {
         self.process = process
         self.terminal = terminal
         record = ServerRecord(pid: process.processIdentifier, executable: binary.path, modelPath: model.path,
-                              modelName: model.name, apiId: apiId, context: context, port: port, log: log.path)
+                              modelName: model.name, apiId: apiId, context: context, port: port, log: log.path, apiKey: key)
         save()
         phase = .starting
         trackEngine(of: process.processIdentifier)
@@ -415,9 +434,7 @@ final class ServerController: ObservableObject {
         logOffset += UInt64(end + 1)
         let lines = String(decoding: data[...end], as: UTF8.self).split(separator: "\n").map(String.init)
         for line in lines {
-            let before = stats.requests.count
-            stats.consume(line)
-            if stats.requests.count > before, var last = stats.requests.popLast() {
+            if stats.consume(line), var last = stats.requests.popLast() {
                 last.client = lastClient.isEmpty ? "—" : lastClient
                 stats.requests.append(last)
             }
@@ -462,7 +479,7 @@ final class ServerController: ObservableObject {
         request.httpMethod = "POST"
         request.timeoutInterval = 180
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !Prefs.apiKey.isEmpty { request.setValue("Bearer \(Prefs.apiKey)", forHTTPHeaderField: "Authorization") }
+        if !apiKey.isEmpty { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": record.apiId, "max_tokens": 48, "temperature": 0,
             "messages": [["role": "user", "content": "Reply with exactly the word OK."]],

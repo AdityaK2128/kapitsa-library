@@ -47,6 +47,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var launching: String?
     /// Models being moved to another folder, with how far each move has got.
     @Published private(set) var relocations: [String: Double] = [:]
+    /// GGUF files being converted.
+    @Published var converting: Set<String> = []
 
     let server = ServerController.shared
     private var booted = false
@@ -133,9 +135,29 @@ final class AppStore: ObservableObject {
         Task { await scan() }
     }
 
-    /// Downloaded models go to the Trash, so a mistake can be undone.
+    /// Why a model's files can't be moved or deleted right now: something running reads or writes them.
+    func busyReason(_ model: LocalModel) -> String? {
+        func uses(_ path: String?) -> Bool {
+            guard let path, !path.isEmpty else { return false }
+            return path == model.path || path.hasPrefix(model.path + "/")
+        }
+        if let path = server.record?.modelPath, uses(path) || uses(self.model(at: path)?.drafter) {
+            return "Stop the running model first; it uses these files."
+        }
+        if let running = BenchmarkRunner.shared.running, uses(running.path) || uses(running.drafter) {
+            return "Wait for the benchmark to finish; it uses these files."
+        }
+        if Downloads.shared.jobs.values.contains(where: { $0.busy && uses($0.folder?.standardizedFileURL.path) }) {
+            return "Pause or finish the download first."
+        }
+        if converting.contains(model.path) { return "Wait for the conversion to finish." }
+        if relocations[model.path] != nil { return "This model is being moved." }
+        return nil
+    }
+
+    /// Models go to the Trash, so a mistake can be undone.
     func trash(_ model: LocalModel) {
-        guard server.record?.modelPath != model.path else { errorMessage = "Stop the model before moving it to the Trash."; return }
+        if let reason = busyReason(model) { errorMessage = reason; return }
         do {
             try FileManager.default.trashItem(at: URL(fileURLWithPath: model.path), resultingItemURL: nil)
             notice = "\(model.name) moved to the Trash."
@@ -146,12 +168,7 @@ final class AppStore: ObservableObject {
     /// Moves a model folder (and anything inside it, such as a bundled drafter) to a folder the user picks,
     /// keeps it in the library, and carries its verification and benchmark records over to the new path.
     func relocate(_ model: LocalModel) {
-        guard server.record?.modelPath != model.path else { errorMessage = "Stop the model before moving it."; return }
-        guard relocations[model.path] == nil else { return }
-        if Downloads.shared.jobs.values.contains(where: { $0.busy && $0.folder?.standardizedFileURL.path == model.path }) {
-            errorMessage = "Pause or finish the download before moving this model."
-            return
-        }
+        if let reason = busyReason(model) { errorMessage = reason; return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -270,11 +287,12 @@ final class AppStore: ObservableObject {
                         page = .discover
                         return
                     }
+                    // Registered before the start, so a start that throws still clears the launch state.
+                    defer { launching = nil }
                     if !server.running {
                         launching = "Starting \(model.name) for \(Agents.displayName(agent))…"
                         try server.start(model, context: model.contexts.contains("64k") ? "64k" : (model.contexts.dropLast().last ?? "max"))
                     }
-                    defer { launching = nil }
                     while server.phase == .starting {
                         try await Task.sleep(nanoseconds: 500_000_000)
                     }
@@ -283,7 +301,7 @@ final class AppStore: ObservableObject {
                         return
                     }
                 }
-                try Agents.launch(agent, project: project, port: server.port)
+                try Agents.launch(agent, project: project, port: server.port, apiKey: server.apiKey)
                 notice = "\(Agents.displayName(agent)) launched in \(project.lastPathComponent)."
             } catch { errorMessage = error.localizedDescription }
         }

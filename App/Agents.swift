@@ -52,10 +52,10 @@ enum Agents {
     }
 
     /// Writes a small launcher script and opens it in the user's terminal of choice.
-    static func launch(_ name: String, project: URL, port: Int) throws {
+    static func launch(_ name: String, project: URL, port: Int, apiKey: String) throws {
         guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
         var command = [binary.path, name, "--port", String(port)]
-        if !Prefs.apiKey.isEmpty { command += ["--api-key", Prefs.apiKey] }
+        if !apiKey.isEmpty { command += ["--api-key", apiKey] }
         if name == "pi" { command += ["--", "--thinking", "off"] }
         let env = Kapitsa.environment()
         var script = "#!/bin/zsh\nset -euo pipefail\n"
