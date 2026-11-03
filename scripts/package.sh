@@ -16,7 +16,7 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 app="$project_dir/Kapitsa Library.app"
 dist="$project_dir/dist"
-export APP_VERSION=${APP_VERSION:-3.0}
+export APP_VERSION=${APP_VERSION:-3.1}
 identity=${SIGN_IDENTITY:-}
 profile=${NOTARY_PROFILE:-}
 
