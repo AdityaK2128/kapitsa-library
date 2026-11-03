@@ -25,6 +25,23 @@ struct AgentTask: Codable, Identifiable, Equatable {
     var insertions = 0
     var deletions = 0
     var message: String?
+    /// A command Nearloop runs itself after each attempt (tests, a build). With one, a failing check sends the
+    /// agent back to work with the output; without one, the agent runs once.
+    var check: String?
+    var maxAttempts: Int?
+    var timeLimitMinutes: Int?
+    var attempts: [Attempt]?
+
+    struct Attempt: Codable, Equatable {
+        let number: Int
+        var started = Date()
+        var finished: Date?
+        /// nil when there is no check, or it didn't get to run.
+        var passed: Bool?
+    }
+
+    /// The last attempt's check result: true passed, false failing, nil no check.
+    var checkPassed: Bool? { check == nil ? nil : attempts?.last?.passed }
 
     var title: String {
         let line = prompt.split(separator: "\n").first.map(String.init) ?? prompt
@@ -72,8 +89,12 @@ final class TaskRunner: ObservableObject {
     @Published private(set) var output: [String] = []
     private var process: Process?
     private var cancelled = false
+    private var timedOut = false
     /// True from picking a task until it has finished, so only one runs at a time.
     private var busy = false
+    /// What a task needs before its agent can start; replaceable so the loop can be exercised without a model.
+    var isInstalled: (String) -> Bool = { AppStore.shared.agents[$0] != nil }
+    var prepareServer: (String) async throws -> Void = { try await AppStore.shared.ensureServer(for: $0) }
 
     /// Agents whose non-interactive mode works against a local model, and how to start one on a task.
     /// They act without asking for approval, which is why tasks default to a separate copy of the project.
@@ -119,31 +140,42 @@ final class TaskRunner: ObservableObject {
 
     // MARK: Queue
 
-    func add(prompt: String, agent: String, project: String, workspace: AgentTask.Workspace) throws {
+    func add(prompt: String, agent: String, project: String, workspace: AgentTask.Workspace,
+             check: String? = nil, maxAttempts: Int = 3, timeLimitMinutes: Int = 60) throws {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         guard Git.isRepository(project) else {
             throw Kapitsa.Failure(errorDescription: "\(URL(fileURLWithPath: project).lastPathComponent) isn’t a git repository. Tasks use git so you can review and undo what the agent changed; run “git init” and commit once first.")
         }
-        tasks.append(AgentTask(id: UUID(), prompt: prompt, agent: agent, project: project, workspace: workspace))
+        var task = AgentTask(id: UUID(), prompt: prompt, agent: agent, project: project, workspace: workspace)
+        let check = check?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !check.isEmpty { task.check = check; task.maxAttempts = maxAttempts; task.timeLimitMinutes = timeLimitMinutes }
+        tasks.append(task)
         save()
         Prefs.rememberProject(project)
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        if Bundle.main.bundleIdentifier != nil {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
         Task { await runNext() }
     }
 
     func cancel(_ id: UUID) {
         if let task = tasks.first(where: { $0.id == id }), task.state == .queued {
             update(id) { $0.state = .cancelled }
-        } else if tasks.first(where: { $0.id == id })?.state == .running, let process, process.isRunning {
+        } else if tasks.first(where: { $0.id == id })?.state == .running {
+            // Between the agent and the check there may be no process; the loop sees the flag before the next one.
             cancelled = true
-            process.interrupt()
+            if let process, process.isRunning { process.interrupt() }
         }
     }
 
     func retry(_ id: UUID) {
         guard let task = tasks.first(where: { $0.id == id }) else { return }
-        tasks.append(AgentTask(id: UUID(), prompt: task.prompt, agent: task.agent, project: task.project, workspace: task.workspace))
+        var again = AgentTask(id: UUID(), prompt: task.prompt, agent: task.agent, project: task.project, workspace: task.workspace)
+        again.check = task.check
+        again.maxAttempts = task.maxAttempts
+        again.timeLimitMinutes = task.timeLimitMinutes
+        tasks.append(again)
         save()
         Task { await runNext() }
     }
@@ -166,17 +198,18 @@ final class TaskRunner: ObservableObject {
         guard !busy, let next = tasks.first(where: { $0.state == .queued }) else { return }
         busy = true
         let id = next.id
-        update(id) { $0.state = .running; $0.started = Date(); $0.message = nil }
+        update(id) { $0.state = .running; $0.started = Date(); $0.message = nil; $0.attempts = [] }
         output = []
         cancelled = false
+        timedOut = false
         do {
-            guard AppStore.shared.agents[next.agent] != nil else {
+            guard isInstalled(next.agent) else {
                 throw Kapitsa.Failure(errorDescription: "\(Agents.displayName(next.agent)) is not installed.")
             }
             let prepared = try await Task.detached { try Self.prepare(next) }.value
             update(id) { $0 = prepared }
-            try await AppStore.shared.ensureServer(for: next.agent)
-            try start(prepared)
+            try await prepareServer(next.agent)
+            await runLoop(prepared)
         } catch {
             finish(id, failure: error.localizedDescription)
         }
@@ -208,22 +241,97 @@ final class TaskRunner: ObservableObject {
         return task
     }
 
-    private func start(_ task: AgentTask) throws {
+    /// Runs the agent, then the check. While the check fails, the agent runs again, in a fresh session, on the
+    /// same files with the failure output, until the check passes, the attempts or the time run out, or the same
+    /// failure comes back: every exit is decided by the check and the limits, never by the agent's own report.
+    private func runLoop(_ task: AgentTask) async {
         guard let binary = Kapitsa.binary, let directory = task.directory else {
-            throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.")
+            return finish(task.id, failure: "Kapitsa engine not found. Reinstall Nearloop.")
         }
+        let id = task.id, log = Self.logURL(task)
+        FileManager.default.createFile(atPath: log.path, contents: Data("$ \(task.agent) · \(task.prompt)\n".utf8))
+        let limit = task.check == nil ? 1 : max(1, task.maxAttempts ?? 3)
+        let minutes = task.timeLimitMinutes ?? 60
+        let deadline = task.check == nil ? Date.distantFuture : Date().addingTimeInterval(Double(minutes * 60))
+        var lastFailure: String?
+        ServerController.shared.measurePrompt(of: task.agent)
+
+        for number in 1...limit {
+            update(id) { $0.attempts = ($0.attempts ?? []) + [AgentTask.Attempt(number: number)] }
+            Self.append(log, "\n── Attempt \(number) of \(limit) ──\n")
+            let prompt = number == 1 ? task.prompt : Self.retryPrompt(task.prompt, check: task.check ?? "", failure: lastFailure ?? "")
+            let agent = await runProcess(binary, agentArguments(task, prompt), in: directory, log: log, deadline: deadline)
+            if cancelled { return finish(id, cancelled: true) }
+            if timedOut { return finish(id, note: "Stopped at the \(minutes)-minute time limit.") }
+            guard agent.code == 0 else {
+                return finish(id, failure: agent.tail.last ?? "\(Agents.displayName(task.agent)) exited with code \(agent.code).")
+            }
+            guard let check = task.check else { return finish(id) }
+
+            Self.append(log, "\n$ \(check)\n")
+            output.append("$ \(check)")
+            let result = await runProcess(URL(fileURLWithPath: "/bin/zsh"), ["-lc", check], in: directory, log: log, deadline: deadline)
+            if cancelled { return finish(id, cancelled: true) }
+            if timedOut { return finish(id, note: "Stopped at the \(minutes)-minute time limit while the check ran.") }
+            let passed = result.code == 0
+            update(id) {
+                guard var attempts = $0.attempts, !attempts.isEmpty else { return }
+                attempts[attempts.count - 1].passed = passed
+                attempts[attempts.count - 1].finished = Date()
+                $0.attempts = attempts
+            }
+            if passed { return finish(id, note: number == 1 ? "The check passed." : "The check passed on attempt \(number).") }
+
+            let failure = result.tail.suffix(60).joined(separator: "\n")
+            // Timings and counters change from run to run; a failure that is otherwise identical means no progress.
+            if let lastFailure, Self.normalized(lastFailure) == Self.normalized(failure) {
+                return finish(id, note: "Stopped: the check failed the same way twice, so another attempt is unlikely to help.")
+            }
+            lastFailure = failure
+        }
+        finish(id, note: "The check still fails after \(limit) attempts.")
+    }
+
+    private func agentArguments(_ task: AgentTask, _ prompt: String) -> [String] {
         let server = ServerController.shared
         var arguments = [task.agent, "--port", String(server.port)]
         if !server.apiKey.isEmpty { arguments += ["--api-key", server.apiKey] }
-        arguments += ["--"] + Self.arguments(task.agent, task.prompt)
+        return arguments + ["--"] + Self.arguments(task.agent, prompt)
+    }
 
-        let log = Self.logURL(task)
-        FileManager.default.createFile(atPath: log.path, contents: Data("$ \(task.agent) · \(task.prompt)\n\n".utf8))
-        let writer = try FileHandle(forWritingTo: log)
+    nonisolated static func retryPrompt(_ prompt: String, check: String, failure: String) -> String {
+        """
+        \(prompt)
+
+        A previous attempt already changed the files here, but this check still fails: \(check)
+        Fix what makes it fail, keeping earlier changes that are correct. The end of its output:
+
+        \(failure)
+        """
+    }
+
+    /// Output with what changes between identical runs blanked out: durations, decimals, clock times and memory
+    /// addresses. Plain counts stay, so "3 failed" then "1 failed" still counts as progress.
+    nonisolated static func normalized(_ text: String) -> String {
+        [#"0x[0-9a-fA-F]+"#, #"\b\d{1,2}:\d{2}(:\d{2})?\b"#, #"\b\d+(\.\d+)?\s?(ms|s|sec|seconds)\b"#, #"\d+\.\d+"#]
+            .reduce(text) { $0.replacingOccurrences(of: $1, with: "#", options: .regularExpression) }
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    nonisolated private static func append(_ log: URL, _ text: String) {
+        guard let handle = try? FileHandle(forWritingTo: log) else { return }
+        handle.seekToEndOfFile()
+        handle.write(Data(text.utf8))
+        try? handle.close()
+    }
+
+    /// Runs one process to the end, streaming its output to the log and the live view; stops it at the deadline.
+    private func runProcess(_ executable: URL, _ arguments: [String], in directory: String, log: URL,
+                            deadline: Date) async -> (code: Int32, tail: [String]) {
+        guard !cancelled, let writer = try? FileHandle(forWritingTo: log) else { return (-1, []) }
         writer.seekToEndOfFile()
-
         let process = Process()
-        process.executableURL = binary
+        process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = URL(fileURLWithPath: directory)
         process.environment = Kapitsa.environment()
@@ -231,8 +339,8 @@ final class TaskRunner: ObservableObject {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
+        var tail: [String] = []
+        let consume: @Sendable (Data) -> Void = { [weak self] data in
             guard !data.isEmpty else { return }
             writer.write(data)
             let lines = String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\r", with: "\n")
@@ -241,40 +349,55 @@ final class TaskRunner: ObservableObject {
                 guard let self else { return }
                 self.output.append(contentsOf: lines)
                 if self.output.count > 400 { self.output.removeFirst(self.output.count - 400) }
+                tail.append(contentsOf: lines)
+                if tail.count > 200 { tail.removeFirst(tail.count - 200) }
             }
         }
-        process.terminationHandler = { [weak self] finished in
-            pipe.fileHandleForReading.readabilityHandler = nil
-            try? writer.close()
-            Task { @MainActor in
-                guard let self else { return }
-                self.process = nil
-                if self.cancelled {
-                    self.finish(task.id, cancelled: true)
-                } else if finished.terminationStatus != 0 {
-                    self.finish(task.id, failure: self.output.last ?? "\(Agents.displayName(task.agent)) exited with code \(finished.terminationStatus).")
-                } else {
-                    self.finish(task.id)
-                }
+        pipe.fileHandleForReading.readabilityHandler = { consume($0.availableData) }
+        // Stops the process at the deadline; cancelled as soon as the process ends on its own.
+        let watchdog = Task { [weak self] in
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+            }
+            if process.isRunning { self?.timedOut = true; process.terminate() }
+        }
+        let code: Int32 = await withCheckedContinuation { continuation in
+            process.terminationHandler = { finished in
+                pipe.fileHandleForReading.readabilityHandler = nil
+                consume(pipe.fileHandleForReading.readDataToEndOfFile())
+                try? writer.close()
+                continuation.resume(returning: finished.terminationStatus)
+            }
+            do {
+                try process.run()
+                self.process = process
+            } catch {
+                process.terminationHandler = nil
+                try? writer.close()
+                continuation.resume(returning: -1)
             }
         }
-        server.measurePrompt(of: task.agent)
-        try process.run()
-        self.process = process
+        watchdog.cancel()
+        self.process = nil
+        await Task.yield()   // let the last output lines land before the caller reads the tail
+        return (code, tail)
     }
 
     /// Records what changed, tells the user, and starts the next task.
-    private func finish(_ id: UUID, failure: String? = nil, cancelled: Bool = false) {
+    private func finish(_ id: UUID, failure: String? = nil, cancelled: Bool = false, note: String? = nil) {
         guard let task = tasks.first(where: { $0.id == id }) else { return }
         let lastWords = output.suffix(3).joined(separator: " ")
         Task {
             let measured = task.directory == nil ? task : await Task.detached { Self.measure(task) }.value
             update(id) {
+                let attempts = $0.attempts
                 $0 = measured
+                $0.attempts = attempts
                 $0.finished = Date()
                 if cancelled { $0.state = .cancelled; $0.message = "Cancelled." }
                 else if let failure { $0.state = .failed; $0.message = failure }
-                else { $0.state = .review; $0.message = lastWords.isEmpty ? nil : String(lastWords.suffix(300)) }
+                else { $0.state = .review; $0.message = note ?? (lastWords.isEmpty ? nil : String(lastWords.suffix(300))) }
             }
             if let done = tasks.first(where: { $0.id == id }) { notify(done) }
             busy = false
@@ -314,8 +437,16 @@ final class TaskRunner: ObservableObject {
     }
 
     private func notify(_ task: AgentTask) {
+        // Notifications belong to an app bundle; outside one (a test run) macOS refuses them.
+        guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
         switch task.state {
+        case .review where task.checkPassed == true:
+            content.title = "Task passed its check"
+            content.body = "\(task.title) · \(task.changedFiles.count) files changed"
+        case .review where task.checkPassed == false:
+            content.title = "Task needs a look: its check still fails"
+            content.body = task.title
         case .review:
             content.title = task.changedFiles.isEmpty ? "Task finished, no changes" : "Task ready to review"
             content.body = "\(task.title) · \(task.changedFiles.count) files changed"

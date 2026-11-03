@@ -7,6 +7,9 @@ struct TasksView: View {
     @State private var project = Prefs.recentProjects.first ?? ""
     @State private var agent = ""
     @State private var workspace = AgentTask.Workspace.copy
+    @State private var check = ""
+    @State private var maxAttempts = 3
+    @State private var timeLimit = 60
     @State private var diffTask: AgentTask?
 
     private var available: [AgentInfo] { Agents.catalog.filter { TaskRunner.agents.contains($0.id) && store.agents[$0.id] != nil } }
@@ -83,6 +86,7 @@ struct TasksView: View {
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                checkSettings
                 HStack(alignment: .center, spacing: 12) {
                     Label("Agents run tasks without asking for approval: they can edit files and run commands on your Mac. Use projects you trust.",
                           systemImage: "exclamationmark.shield")
@@ -96,6 +100,31 @@ struct TasksView: View {
         }.card()
     }
 
+    /// An optional command that proves the work is done, and the limits on retrying until it passes.
+    private var checkSettings: some View {
+        let hasCheck = !check.trimmingCharacters(in: .whitespaces).isEmpty
+        return HStack(alignment: .top, spacing: 10) {
+            Text("Check").foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Optional: a command that proves it worked, such as swift build or npm test", text: $check)
+                    .textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
+                if hasCheck {
+                    HStack(spacing: 18) {
+                        Stepper("Up to \(maxAttempts) attempts", value: $maxAttempts, in: 1...6).fixedSize()
+                        Picker("Time limit", selection: $timeLimit) {
+                            ForEach([15, 30, 60, 120, 240], id: \.self) { Text($0 < 60 ? "\($0) min" : "\($0 / 60) h").tag($0) }
+                        }.fixedSize()
+                    }
+                }
+                Text(hasCheck
+                     ? "Nearloop runs the check itself after each attempt. While it fails, the agent starts a fresh session on the same files with the output, until the check passes, the attempts or the time run out, or the same failure repeats." +
+                       (workspace == .copy ? " The separate copy has no ignored folders such as node_modules; choose the project folder if the check needs them." : "")
+                     : "Without a check the agent runs once and you judge the result.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private var projects: [String] {
         var list = Prefs.recentProjects
         if !project.isEmpty && !list.contains(project) { list.insert(project, at: 0) }
@@ -106,7 +135,8 @@ struct TasksView: View {
 
     private func add() {
         do {
-            try runner.add(prompt: prompt, agent: agent, project: project, workspace: workspace)
+            try runner.add(prompt: prompt, agent: agent, project: project, workspace: workspace,
+                           check: check, maxAttempts: maxAttempts, timeLimitMinutes: timeLimit)
             prompt = ""
         } catch { store.errorMessage = error.localizedDescription }
     }
@@ -125,6 +155,7 @@ private struct TaskRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(task.title).font(.body.weight(.medium)).lineLimit(2)
                     Text(details).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    if let check = task.check { attemptsLine(check) }
                     if let message = task.message, task.state != .running {
                         Text(message).font(.caption).foregroundStyle(task.state == .failed ? .orange : .secondary)
                             .lineLimit(3).fixedSize(horizontal: false, vertical: true)
@@ -146,6 +177,25 @@ private struct TaskRow: View {
         }.card(padding: 16)
     }
 
+    /// "npm test  ✗ ✓": the check and how each attempt went.
+    private func attemptsLine(_ check: String) -> some View {
+        HStack(spacing: 6) {
+            Text(check).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            ForEach(task.attempts ?? [], id: \.number) { attempt in
+                Group {
+                    switch attempt.passed {
+                    case true?: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    case false?: Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+                    case nil: Image(systemName: task.state == .running ? "circle.dotted" : "minus.circle").foregroundStyle(.secondary)
+                    }
+                }.font(.caption).help("Attempt \(attempt.number)" + (attempt.passed.map { $0 ? ": check passed" : ": check failed" } ?? ""))
+            }
+            if task.state == .running, let count = task.attempts?.count {
+                Text("attempt \(count) of \(task.maxAttempts ?? 3)").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var details: String {
         var parts = [TasksView.display(task.project), Agents.displayName(task.agent), task.workspace == .copy ? "separate copy" : "project folder"]
         if let started = task.started {
@@ -162,6 +212,10 @@ private struct TaskRow: View {
         switch task.state {
         case .queued: Image(systemName: "clock").foregroundStyle(.secondary).help("Waiting")
         case .running: ProgressView().controlSize(.small)
+        case .review where task.checkPassed == true:
+            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green).help("The check passed; ready to review")
+        case .review where task.checkPassed == false:
+            Image(systemName: "xmark.seal").foregroundStyle(.orange).help("The check still fails; review what it did")
         case .review: Image(systemName: task.changedFiles.isEmpty ? "checkmark.circle" : "eye.circle.fill")
             .foregroundStyle(task.changedFiles.isEmpty ? Color.secondary : Color.accentColor).help(task.changedFiles.isEmpty ? "Finished" : "Ready to review")
         case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).help("Failed")
