@@ -84,7 +84,8 @@ final class AppStore: ObservableObject {
         defer { scanning = false }
         let roots = allLibraries, verified = Registry.load()
         models = await Task.detached { ModelScanner.scan(libraries: roots, verified: verified) }.value
-        let found = await Task.detached { Agents.installed() }.value
+        // Re-read the shell's PATH each scan, so Refresh finds an agent installed while the app was open.
+        let found = await Task.detached { Kapitsa.refreshShellPath(); return Agents.installed() }.value
         agents = found
         let current = models
         benchmarks = await Task.detached { BenchmarkStore.load(models: current) }.value

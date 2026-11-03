@@ -116,22 +116,55 @@ enum Kapitsa {
         }?.replacingOccurrences(of: "[kapitsa] ", with: "")
     }
 
-    /// The PATH the user's own terminal gets from their login shell, as it is.
-    static let shellPath: String = {
-        let fallback = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        let result = try? runSync("/bin/zsh", ["-lc", "print -rn -- $PATH"], timeout: 5)
-        return (result?.code == 0 ? result?.output : nil).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
-    }()
+    private static let pathLock = NSLock()
+    private static var cachedShellPath: String?
 
-    /// The login-shell PATH plus the usual install folders, so agents installed by npm, Homebrew or pipx are
-    /// found from the GUI.
-    static let loginPath: String = {
-        let extras = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
+    /// The PATH the user's own terminal gets. Read once, and again after `refreshShellPath()`.
+    static var shellPath: String {
+        pathLock.lock()
+        defer { pathLock.unlock() }
+        if let cachedShellPath { return cachedShellPath }
+        let path = readShellPath()
+        cachedShellPath = path
+        return path
+    }
+
+    /// Forgets the PATH, so an agent installed since the last read is found.
+    static func refreshShellPath() {
+        pathLock.lock()
+        cachedShellPath = nil
+        pathLock.unlock()
+    }
+
+    /// An app opened from Finder inherits only launchd's short PATH, and a login shell alone skips ~/.zshrc
+    /// (or ~/.bashrc), where installers such as OpenCode's, Bun's and nvm's add their folders. So ask an
+    /// interactive login shell, as a terminal window would; startup files may print banners, so markers pick
+    /// the PATH out of whatever else is written.
+    private static func readShellPath() -> String {
+        let fallback = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let shell = ProcessInfo.processInfo.environment["SHELL"]
+            .flatMap { ["zsh", "bash"].contains(URL(fileURLWithPath: $0).lastPathComponent) ? $0 : nil } ?? "/bin/zsh"
+        let script = #"printf '%s' "__KL_PATH__${PATH}__KL_END__""#
+        for (flags, timeout) in [("-ilc", 6.0), ("-lc", 4.0)] {
+            guard let output = (try? runSync(shell, [flags, script], timeout: timeout))?.output,
+                  let start = output.range(of: "__KL_PATH__"),
+                  let end = output.range(of: "__KL_END__", range: start.upperBound..<output.endIndex) else { continue }
+            let path = String(output[start.upperBound..<end.lowerBound])
+            if !path.isEmpty { return path }
+        }
+        return fallback
+    }
+
+    /// The shell's PATH plus the usual install folders, so agents installed by npm, Homebrew, pipx or the
+    /// OpenCode installer are found from the GUI.
+    static var loginPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let extras = [home.appendingPathComponent(".local/bin").path, home.appendingPathComponent(".opencode/bin").path,
                       "/opt/homebrew/bin", "/usr/local/bin"]
         return (shellPath.split(separator: ":").map(String.init) + extras).reduce(into: [String]()) {
             if !$0.contains($1) { $0.append($1) }
         }.joined(separator: ":")
-    }()
+    }
 
     static func environment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
