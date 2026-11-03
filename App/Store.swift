@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum Page: String, CaseIterable, Identifiable {
-    case home, discover, models, agents, benchmarks
+    case home, discover, models, agents, tasks, benchmarks
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -10,6 +10,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .discover: return "Discover"
         case .models: return "My Models"
         case .agents: return "Agents"
+        case .tasks: return "Tasks"
         case .benchmarks: return "Benchmarks"
         }
     }
@@ -19,6 +20,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .discover: return "sparkle.magnifyingglass"
         case .models: return "square.stack.3d.up"
         case .agents: return "terminal"
+        case .tasks: return "checklist"
         case .benchmarks: return "gauge.with.dots.needle.67percent"
         }
     }
@@ -315,26 +317,12 @@ final class AppStore: ObservableObject {
         }
         Task {
             do {
-                if !(server.phase == .ready || server.phase == .external) {
-                    guard let model = agentModel else {
-                        errorMessage = "No model available. Download one from Discover or add a model folder."
-                        page = .discover
-                        return
-                    }
-                    // Registered before the start, so a start that throws still clears the launch state.
-                    defer { launching = nil }
-                    if !server.running {
-                        launching = "Starting \(model.name) for \(Agents.displayName(agent))…"
-                        try server.start(model, context: agentContext(agent, model))
-                    }
-                    while server.phase == .starting {
-                        try await Task.sleep(nanoseconds: 500_000_000)
-                    }
-                    guard server.phase == .ready else {
-                        errorMessage = "Model failed to start. \(Agents.displayName(agent)) was not launched. See Logs for details."
-                        return
-                    }
+                if !(server.phase == .ready || server.phase == .external) && agentModel == nil {
+                    errorMessage = "No model available. Download one from Discover or add a model folder."
+                    page = .discover
+                    return
                 }
+                try await ensureServer(for: agent)
                 if !force, let fit = contextFit(agent), fit.level == .overflow {
                     launchWarning = LaunchWarning(agent: agent, project: project, message: fit.message)
                     return
@@ -343,6 +331,26 @@ final class AppStore: ObservableObject {
                 try Agents.launch(agent, project: project, port: server.port, apiKey: server.apiKey)
                 notice = "\(Agents.displayName(agent)) launched in \(project.lastPathComponent)."
             } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    /// Loads the agent model when nothing is serving, and waits until it answers.
+    func ensureServer(for agent: String) async throws {
+        if server.phase == .ready || server.phase == .external { return }
+        guard let model = agentModel else {
+            throw Kapitsa.Failure(errorDescription: "No model available. Download one from Discover or add a model folder.")
+        }
+        // Registered before the start, so a start that throws still clears the launch state.
+        defer { launching = nil }
+        if !server.running {
+            launching = "Starting \(model.name) for \(Agents.displayName(agent))…"
+            try server.start(model, context: agentContext(agent, model))
+        }
+        while server.phase == .starting {
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        guard server.phase == .ready else {
+            throw Kapitsa.Failure(errorDescription: "The model failed to start, so \(Agents.displayName(agent)) didn’t run. See Logs for details.")
         }
     }
 

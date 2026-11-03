@@ -6,12 +6,14 @@ struct MainWindow: View {
     @ObservedObject var store = AppStore.shared
     @ObservedObject var server = ServerController.shared
     @ObservedObject var downloads = Downloads.shared
+    @ObservedObject var tasks = TaskRunner.shared
 
     var body: some View {
         NavigationSplitView {
             List(selection: Binding(get: { store.page }, set: { if let page = $0 { store.page = page } })) {
                 ForEach(Page.allCases) { page in
                     Label(page.title, systemImage: page.symbol).tag(page)
+                        .badge(page == .tasks ? tasks.active : 0)
                 }
             }
             .safeAreaInset(edge: .bottom) { sidebarFooter }
@@ -24,6 +26,7 @@ struct MainWindow: View {
                     case .discover: DiscoverView()
                     case .models: ModelsView()
                     case .agents: AgentsView()
+                    case .tasks: TasksView()
                     case .benchmarks: BenchmarksView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -198,7 +201,12 @@ struct SettingsView: View {
 
             Form {
                 TextField("Port", value: $port, format: .number.grouping(.never))
-                Stepper("Concurrent Requests: \(slots)", value: $slots, in: 1...4)
+                Picker("Concurrent Requests", selection: $slots) {
+                    Text("Automatic (up to 4)").tag(0)
+                    ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
+                }
+                Text("Requests beyond this wait their turn. Each one in flight keeps its own conversation in memory, so more of them means less context each. Choose 2 or more to let a background task and an agent work at the same time.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Picker("Prompt Cache (SSD)", selection: $diskCache) {
                     Text("Automatic").tag("auto"); Text("2 GB").tag("2G"); Text("8 GB").tag("8G"); Text("16 GB").tag("16G"); Text("Off").tag("0")
                 }
@@ -264,6 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated {
             let server = ServerController.shared
             BenchmarkRunner.shared.cancel()
+            TaskRunner.shared.stopAll()
             guard server.owned else { return .terminateNow }
             let alert = NSAlert()
             alert.messageText = "Stop Running Model?"

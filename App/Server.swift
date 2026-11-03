@@ -254,8 +254,9 @@ final class ServerController: ObservableObject {
         }
         let apiId = model.name.replacingOccurrences(of: #"[^A-Za-z0-9_.-]+"#, with: "-", options: .regularExpression) + "-" + model.id.prefix(6)
         var arguments = ["serve", "--model", Kapitsa.loadPath(for: model.path), "--model-id", apiId,
-                         "--port", String(port), "--context", context, "--slots", String(Prefs.slots),
+                         "--port", String(port), "--context", context,
                          "--disk-cache", Prefs.diskCache]
+        if let slots = Prefs.slots { arguments += ["--slots", String(slots)] }
         if !Prefs.shareOnNetwork { arguments.append("--private") }
         let key = Prefs.apiKey
         if !key.isEmpty { arguments += ["--api-key", key] }

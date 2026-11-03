@@ -35,7 +35,11 @@ enum Prefs {
         return defaults
     }()
     static var port: Int { let v = defaults.integer(forKey: "port"); return (1024...65535).contains(v) ? v : 8000 }
-    static var slots: Int { max(1, defaults.integer(forKey: "slots")) }
+    /// Requests Kapitsa serves at once; nil lets Kapitsa choose (up to 4, as memory allows). Unset means 1.
+    static var slots: Int? {
+        guard let value = defaults.object(forKey: "slots") as? Int else { return 1 }
+        return value == 0 ? nil : max(1, value)
+    }
     /// Agents' first-request sizes seen on this Mac, by agent id.
     static var agentPrompts: [String: Int] {
         get { (defaults.dictionary(forKey: "agentPromptTokens") as? [String: Int]) ?? [:] }
