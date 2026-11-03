@@ -1,11 +1,11 @@
 #!/bin/zsh
-# Builds Kapitsa Library.app with Kapitsa bundled inside, ad-hoc signed for this Mac.
+# Builds Nearloop.app with the Kapitsa engine bundled inside, ad-hoc signed for this Mac.
 # For a signed, notarized DMG to share, run scripts/package.sh afterwards.
 set -euo pipefail
 project_dir=${0:A:h}
-app="$project_dir/Kapitsa Library.app"
-version=${APP_VERSION:-3.1.1}
-build=${APP_BUILD:-8}
+app="$project_dir/Nearloop.app"
+version=${APP_VERSION:-3.2}
+build=${APP_BUILD:-9}
 
 # The Kapitsa binary to bundle: KAPITSA_BIN, else the installed Homebrew copy, else vendor/kapitsa
 # (bin/kapitsa with share/kapitsa/LICENSE and THIRD_PARTY_NOTICES beside it, as Homebrew lays it out).
@@ -22,7 +22,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/kapitsa-licenses"
 /usr/bin/swiftc -swift-version 5 -parse-as-library -O \
   -target arm64-apple-macosx14.0 \
   -framework SwiftUI -framework AppKit \
-  "$project_dir"/App/*.swift -o "$app/Contents/MacOS/KapitsaLibrary"
+  "$project_dir"/App/*.swift -o "$app/Contents/MacOS/Nearloop"
 cp "$kapitsa_bin" "$app/Contents/MacOS/kapitsa"
 chmod 755 "$app/Contents/MacOS/kapitsa"
 for notice in LICENSE THIRD_PARTY_NOTICES; do
@@ -36,11 +36,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>KapitsaLibrary</string>
+<key>CFBundleExecutable</key><string>Nearloop</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundleIdentifier</key><string>${BUNDLE_ID:-com.adityak2128.kapitsa-library}</string>
-<key>CFBundleName</key><string>Kapitsa Library</string>
-<key>CFBundleDisplayName</key><string>Kapitsa Library</string>
+<key>CFBundleIdentifier</key><string>${BUNDLE_ID:-com.adityak2128.nearloop}</string>
+<key>CFBundleName</key><string>Nearloop</string>
+<key>CFBundleDisplayName</key><string>Nearloop</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$build</string>

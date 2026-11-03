@@ -155,7 +155,9 @@ enum ModelScanner {
         // Kapitsa assumes 128K when a config states no limit.
         let native = (text["max_position_embeddings"] as? Int) ?? 131072
         row.nativeContext = native
-        row.contexts = contexts.filter { $0.1 <= native }.map(\.0) + ["max"]
+        // "Max" only when it is more than the largest preset; a 128K model would otherwise list 128K twice.
+        let presets = contexts.filter { $0.1 <= native }
+        row.contexts = presets.map(\.0) + (presets.last?.1 == native ? [] : ["max"])
         row.targetSignature = targetSignature(config)
         return row
     }

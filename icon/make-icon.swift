@@ -1,6 +1,5 @@
-// Draws the Kapitsa Library app icon: a geometric K whose upper arm is a pendulum ending in its bob,
-// after Kapitsa's pendulum, which the engine is named for. Usage: swift make-icon.swift OUT.png [size]
-// (icon/concepts.swift renders the alternatives that were considered.)
+// Draws the Nearloop app icon: a loop, the agent's work cycle, with an amber point travelling on it, kept
+// close (near) on your Mac. Usage: swift make-icon.swift OUT.png [size]
 import AppKit
 import CoreGraphics
 
@@ -32,23 +31,18 @@ let sheen = CGGradient(colorsSpace: space, colors: [rgb(0xFFFFFF, 0.12), rgb(0xF
 ctx.drawLinearGradient(sheen, start: CGPoint(x: 512, y: 924), end: CGPoint(x: 512, y: 560), options: [])
 ctx.restoreGState()
 
-func stroke(_ a: CGPoint, _ b: CGPoint, width: CGFloat) {
-    ctx.setStrokeColor(rgb(0xF5F5F7)); ctx.setLineWidth(width); ctx.setLineCap(.round)
-    ctx.move(to: a); ctx.addLine(to: b); ctx.strokePath()
-}
+// The loop: a thick ring with a gap where the point is passing, so the point reads as moving along it.
+let center = CGPoint(x: 512, y: 512), radius: CGFloat = 228, point = CGFloat.pi / 4
+ctx.setStrokeColor(rgb(0xF5F5F7)); ctx.setLineWidth(88); ctx.setLineCap(.round)
+ctx.addArc(center: center, radius: radius, startAngle: point + 0.64, endAngle: point - 0.64 + 2 * .pi, clockwise: false)
+ctx.strokePath()
 
-// The K: stem, lower leg, and an upper arm drawn as the pendulum's rod.
-ctx.setFillColor(rgb(0xF5F5F7))
-ctx.addPath(CGPath(roundedRect: CGRect(x: 318, y: 262, width: 96, height: 500), cornerWidth: 26, cornerHeight: 26, transform: nil))
-ctx.fillPath()
-stroke(CGPoint(x: 440, y: 500), CGPoint(x: 660, y: 290), width: 92)
-stroke(CGPoint(x: 424, y: 520), CGPoint(x: 612, y: 676), width: 30)
-
-// The pendulum's bob.
+// The point on the loop.
 ctx.saveGState()
 ctx.setShadow(offset: CGSize(width: 0, height: -6), blur: 22, color: rgb(0x000000, 0.35))
 ctx.setFillColor(rgb(0xFFB547))
-ctx.fillEllipse(in: CGRect(x: 646 - 74, y: 706 - 74, width: 148, height: 148))
+let dot = CGPoint(x: center.x + radius * cos(point), y: center.y + radius * sin(point))
+ctx.fillEllipse(in: CGRect(x: dot.x - 78, y: dot.y - 78, width: 156, height: 156))
 ctx.restoreGState()
 
 let image = ctx.makeImage()!

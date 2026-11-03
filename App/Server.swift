@@ -235,7 +235,7 @@ final class ServerController: ObservableObject {
         guard BenchmarkRunner.shared.running == nil else {
             throw Kapitsa.Failure(errorDescription: "A benchmark is running. Wait for it to finish or cancel it before loading a model.")
         }
-        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         if let problem = Kapitsa.storageProblem() { throw Kapitsa.Failure(errorDescription: problem) }
         let port = Prefs.port
         if Self.listener(port) != 0 {

@@ -1,6 +1,8 @@
-# Kapitsa Library
+# Nearloop
 
-![Kapitsa Library: local models for your coding agents, on your Mac](docs/images/hero.png)
+![Nearloop: local models for your coding agents, on your Mac](docs/images/hero.png)
+
+*Formerly Kapitsa Library.*
 
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20development-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/aditya2128)
 
@@ -78,8 +80,8 @@ Everything runs on your Mac. The app contacts the network only to download model
 ## Building
 
 ```sh
-./build-library-app.sh            # builds Kapitsa Library.app with Kapitsa bundled (from Homebrew, or KAPITSA_BIN=/path/to/kapitsa)
-scripts/package.sh                # makes dist/Kapitsa-Library-<version>.dmg
+./build-library-app.sh            # builds Nearloop.app with Kapitsa bundled (from Homebrew, or KAPITSA_BIN=/path/to/kapitsa)
+scripts/package.sh                # makes dist/Nearloop-<version>.dmg
 ```
 
 The sources are in `App/` (SwiftUI, no dependencies) and the icon in `icon/` (`make-icon.swift` draws it). README images are composed from window captures by `docs/images/compose.swift`; the engine chart is drawn from Kapitsa's published numbers by `docs/images/engines.swift`. To share the app without Gatekeeper warnings, sign and notarize it with a Developer ID Application certificate:
@@ -92,15 +94,15 @@ The header of `scripts/package.sh` explains the one-time notary setup. The bundl
 
 ## Support
 
-Kapitsa Library is free. If it's useful to you, you can support its development on [Ko-fi](https://ko-fi.com/aditya2128).
+Nearloop is free. If it's useful to you, you can support its development on [Ko-fi](https://ko-fi.com/aditya2128).
 
 ## License
 
-Kapitsa Library is licensed under the [Apache License 2.0](LICENSE). The bundled Kapitsa engine, the coding agents and the models keep their own licenses (see Credits).
+Nearloop is licensed under the [Apache License 2.0](LICENSE). The bundled Kapitsa engine, the coding agents and the models keep their own licenses (see Credits).
 
 ## Credits
 
-- **Inference engine:** [Kapitsa](https://github.com/nace-ai/kapitsa) by Nace AI, Apache License 2.0. Its license and third-party notices ship in the app at `Contents/Resources/kapitsa-licenses`. Kapitsa Library is an independent front end and is not affiliated with or endorsed by the Kapitsa project.
+- **Inference engine:** [Kapitsa](https://github.com/nace-ai/kapitsa) by Nace AI, Apache License 2.0. Its license and third-party notices ship in the app at `Contents/Resources/kapitsa-licenses`. Nearloop is an independent front end and is not affiliated with or endorsed by the Kapitsa project.
 - **Benchmark data** in this README is published by the Kapitsa project (sources above).
 - **Coding agents** are products of their makers: Claude Code (Anthropic), OpenCode (SST), Codex CLI (OpenAI) and Pi (Mario Zechner).
 - **Models** keep their own licenses; check each model's card before use.

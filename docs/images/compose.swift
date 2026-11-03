@@ -74,7 +74,7 @@ canvas(2400, 1200, "hero.png") { ctx in
     let width: CGFloat = 1480, height = width * CGFloat(home.height) / CGFloat(home.width)
     window(ctx, home, in: CGRect(x: 1080, y: (1200 - height) / 2 - 20, width: width, height: height))
     ctx.draw(icon, in: CGRect(x: 100, y: 700, width: 300, height: 300))
-    text("Kapitsa Library", size: 104, weight: .bold, color: .white, at: CGPoint(x: 140, y: 548), tracking: -1.5)
+    text("Nearloop", size: 104, weight: .bold, color: .white, at: CGPoint(x: 140, y: 548), tracking: -1.5)
     text("Local models for your coding agents, on your Mac.", size: 40, weight: .regular, color: NSColor(white: 0.72, alpha: 1), at: CGPoint(x: 144, y: 478))
     var x: CGFloat = 140
     for label in ["Claude Code", "OpenCode", "Codex", "Pi"] { x += chip(label, at: CGPoint(x: x, y: 330)) + 16 }

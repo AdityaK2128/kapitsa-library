@@ -36,7 +36,7 @@ struct CatalogFamily: Identifiable, Hashable {
 enum Catalog {
 
     static func load() throws -> [CatalogFamily] {
-        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         let help = try Kapitsa.runSync(binary.path, ["--help"], env: Kapitsa.environment(), timeout: 20).output
         let list = try Kapitsa.runSync(binary.path, ["list"], env: Kapitsa.environment(), timeout: 30).output
         return parse(help: help, list: list)
@@ -221,7 +221,7 @@ final class Downloads: ObservableObject {
     }
 
     private func run(_ spec: String) throws {
-        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         let process = Process()
         process.executableURL = binary
         process.arguments = ["pull", spec]

@@ -5,7 +5,7 @@ struct HomeView: View {
     @ObservedObject var server = ServerController.shared
 
     var body: some View {
-        PageScaffold(title: "Kapitsa Library", subtitle: "Local inference for coding agents, on your Mac.") {
+        PageScaffold(title: "Nearloop", subtitle: "Local models for your coding agents, on your Mac. Powered by Kapitsa.") {
             if let problem = Kapitsa.storageProblem() {
                 Label(problem, systemImage: "lock.trianglebadge.exclamationmark").foregroundStyle(.orange)
                     .textSelection(.enabled).fixedSize(horizontal: false, vertical: true).card()

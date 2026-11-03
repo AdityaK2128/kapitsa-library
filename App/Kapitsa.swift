@@ -3,8 +3,13 @@ import Foundation
 
 enum AppPaths {
     static let support: URL = {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Kapitsa Library")
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let url = base.appendingPathComponent("Nearloop")
+        // Data from before the app was renamed (verification records, benchmarks, launchers) moves over once.
+        let legacy = base.appendingPathComponent("Kapitsa Library")
+        if !FileManager.default.fileExists(atPath: url.path), FileManager.default.fileExists(atPath: legacy.path) {
+            try? FileManager.default.moveItem(at: legacy, to: url)
+        }
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
@@ -17,7 +22,18 @@ enum AppPaths {
 
 /// UserDefaults keys shared with the Settings view's @AppStorage.
 enum Prefs {
-    static var defaults: UserDefaults { .standard }
+    static let defaults: UserDefaults = {
+        let defaults = UserDefaults.standard
+        // Settings from before the app was renamed, kept under the old bundle ID, carry over once.
+        if !defaults.bool(forKey: "migratedFromKapitsaLibrary") {
+            defaults.set(true, forKey: "migratedFromKapitsaLibrary")
+            for (key, value) in defaults.persistentDomain(forName: "com.adityak2128.kapitsa-library") ?? [:]
+            where defaults.object(forKey: key) == nil {
+                defaults.set(value, forKey: key)
+            }
+        }
+        return defaults
+    }()
     static var port: Int { let v = defaults.integer(forKey: "port"); return (1024...65535).contains(v) ? v : 8000 }
     static var slots: Int { max(1, defaults.integer(forKey: "slots")) }
     static var diskCache: String { defaults.string(forKey: "diskCache").flatMap { $0.isEmpty ? nil : $0 } ?? "auto" }
@@ -258,17 +274,20 @@ enum Kapitsa {
 
     /// `kapitsa` on the user's PATH, running this app's copy with this app's storage settings.
     static var commandURL: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/kapitsa") }
-    static let commandMarker = "# Installed by Kapitsa Library"
+    static let commandMarker = "# Installed by Nearloop"
+    /// The marker the command carried before the app was renamed; such a command shows as outdated.
+    static let legacyCommandMarker = "# Installed by Kapitsa Library"
 
     static var commandState: String {
         let path = commandURL.path
         guard FileManager.default.fileExists(atPath: path) else { return "missing" }
         let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-        return text.contains(commandMarker) ? (text.contains(binary?.path ?? "\0") ? "installed" : "outdated") : "foreign"
+        guard text.contains(commandMarker) || text.contains(legacyCommandMarker) else { return "foreign" }
+        return text.contains(commandMarker) && text.contains(binary?.path ?? "\0") ? "installed" : "outdated"
     }
 
     static func installCommand() throws {
-        guard let binary else { throw Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary else { throw Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         if commandState == "foreign" {
             throw Failure(errorDescription: "\(commandURL.path) already exists and was not installed by this app. Remove it first if you want this app's Kapitsa there.")
         }
@@ -325,7 +344,7 @@ enum Kapitsa {
     }
 
     static func run(_ arguments: [String], timeout: TimeInterval) async throws -> Output {
-        guard let binary else { throw Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary else { throw Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         return try await Task.detached { try runSync(binary.path, arguments, env: environment(), timeout: timeout) }.value
     }
 }
@@ -339,7 +358,7 @@ final class StreamingCommand: ObservableObject {
     private var process: Process?
 
     func start(_ arguments: [String], finished: @escaping (Int32) -> Void = { _ in }) throws {
-        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         let process = Process()
         process.executableURL = binary
         process.arguments = arguments

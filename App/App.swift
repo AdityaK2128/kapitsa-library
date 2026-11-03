@@ -50,7 +50,7 @@ struct MainWindow: View {
             default: break
             }
         }
-        .alert("Kapitsa Library", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
+        .alert("Nearloop", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("OK") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
         .sheet(isPresented: $store.showLog) { LogSheet() }
@@ -121,10 +121,10 @@ struct MenuBarContent: View {
             if store.agents.isEmpty { Text("No Agents Installed") }
         }
         Divider()
-        Button("Open Kapitsa Library") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        Button("Open Nearloop") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         SettingsLink { Text("Settings…") }
         Divider()
-        Button("Quit Kapitsa Library") { NSApp.terminate(nil) }.keyboardShortcut("q")
+        Button("Quit Nearloop") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
 }
 
@@ -278,14 +278,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct KapitsaLibraryApp: App {
+struct NearloopApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @ObservedObject private var server = ServerController.shared
 
     init() { Prefs.migrate() }
 
     var body: some Scene {
-        Window("Kapitsa Library", id: "main") {
+        Window("Nearloop", id: "main") {
             MainWindow().tint(Color(red: 0.29, green: 0.55, blue: 0.76))
         }
         .defaultSize(width: 1180, height: 800)

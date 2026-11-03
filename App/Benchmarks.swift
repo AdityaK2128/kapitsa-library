@@ -100,7 +100,7 @@ final class BenchmarkRunner: ObservableObject {
         guard !ServerController.shared.running else {
             throw Kapitsa.Failure(errorDescription: "Stop the running model first. Benchmarks start a dedicated server.")
         }
-        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         if let problem = Kapitsa.storageProblem() { throw Kapitsa.Failure(errorDescription: problem) }
         let need = SystemMemory.estimatedNeedGB(model)
         let budget = SystemMemory.safeBudgetGB()
