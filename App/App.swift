@@ -11,10 +11,10 @@ struct MainWindow: View {
     var body: some View {
         NavigationSplitView {
             List(selection: Binding(get: { store.page }, set: { if let page = $0 { store.page = page } })) {
-                ForEach(Page.allCases.filter { $0.section == nil }) { row($0) }
+                ForEach(Page.allCases.filter { $0.section == nil }, id: \.self) { row($0) }
                 ForEach(Page.sections, id: \.self) { section in
                     Section(section) {
-                        ForEach(Page.allCases.filter { $0.section == section }) { row($0) }
+                        ForEach(Page.allCases.filter { $0.section == section }, id: \.self) { row($0) }
                     }
                 }
             }
@@ -67,8 +67,10 @@ struct MainWindow: View {
         .sheet(isPresented: $store.showLog) { LogSheet() }
     }
 
+    /// The tag must be the outermost modifier: a list matches rows to its selection by it, and a modifier
+    /// applied after it (such as the badge) hides it, which leaves every row unclickable.
     private func row(_ page: Page) -> some View {
-        Label(page.title, systemImage: page.symbol).tag(page).badge(page == .tasks ? tasks.active : 0)
+        Label(page.title, systemImage: page.symbol).badge(page == .tasks ? tasks.active : 0).tag(page)
     }
 
     private var sidebarFooter: some View {
