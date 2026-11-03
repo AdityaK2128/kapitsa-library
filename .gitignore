@@ -25,4 +25,4 @@ vendor/
 /scripts/bench_report.py
 /tests/
 /benchmarks/
-/docs/extreme4tb-setup.md
+/docs/*-setup.md
