@@ -1,0 +1,340 @@
+import Darwin
+import Foundation
+
+enum AppPaths {
+    static let support: URL = {
+        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Kapitsa Library")
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+    static func folder(_ name: String) -> URL {
+        let url = support.appendingPathComponent(name)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}
+
+/// UserDefaults keys shared with the Settings view's @AppStorage.
+enum Prefs {
+    static var defaults: UserDefaults { .standard }
+    static var port: Int { let v = defaults.integer(forKey: "port"); return (1024...65535).contains(v) ? v : 8000 }
+    static var slots: Int { max(1, defaults.integer(forKey: "slots")) }
+    static var diskCache: String { defaults.string(forKey: "diskCache").flatMap { $0.isEmpty ? nil : $0 } ?? "auto" }
+    static var shareOnNetwork: Bool { defaults.bool(forKey: "shareOnNetwork") }
+    static var terminal: String { defaults.string(forKey: "terminalApp") ?? "terminal" }
+    static var runtimeFolder: String? { defaults.string(forKey: "runtimeFolder").flatMap { $0.isEmpty ? nil : $0 } }
+    static var libraries: [String] {
+        get { defaults.stringArray(forKey: "libraryFolders") ?? [] }
+        set { defaults.set(newValue, forKey: "libraryFolders") }
+    }
+    /// Cap Kapitsa's GPU memory at what is free less a margin, so loading never causes swapping.
+    static var protectMemory: Bool { defaults.object(forKey: "protectMemory") as? Bool ?? true }
+    static var memoryMargin: Double { let v = defaults.double(forKey: "memoryMargin"); return v > 0 ? v : 2 }
+    static var apiKey: String { defaults.string(forKey: "apiKey") ?? "" }
+    static var autoStart: Bool { defaults.bool(forKey: "autoStartLastModel") }
+    static var lastModel: String? {
+        get { defaults.string(forKey: "lastModelPath") }
+        set { defaults.set(newValue, forKey: "lastModelPath") }
+    }
+    static var lastContext: String {
+        get { defaults.string(forKey: "lastContext") ?? "64k" }
+        set { defaults.set(newValue, forKey: "lastContext") }
+    }
+    static var agentModel: String? {
+        get { defaults.string(forKey: "agentModelPath").flatMap { $0.isEmpty ? nil : $0 } }
+        set { defaults.set(newValue, forKey: "agentModelPath") }
+    }
+    static var recentProjects: [String] {
+        get { (defaults.stringArray(forKey: "recentProjects") ?? []).filter { FileManager.default.fileExists(atPath: $0) } }
+        set { defaults.set(Array(newValue.prefix(8)), forKey: "recentProjects") }
+    }
+    static func rememberProject(_ path: String) {
+        recentProjects = [path] + recentProjects.filter { $0 != path }
+    }
+
+    /// Carries settings over from the 1.x launcher, which scanned one folder on one SSD.
+    static func migrate() {
+        guard !defaults.bool(forKey: "migratedV2") else { return }
+        defaults.set(true, forKey: "migratedV2")
+        guard let old = defaults.string(forKey: "modelsRoot"), FileManager.default.fileExists(atPath: old) else { return }
+        if libraries.isEmpty { libraries = [old] }
+        let runtime = URL(fileURLWithPath: old).appendingPathComponent("kapitsa-runtime").path
+        if runtimeFolder == nil && FileManager.default.fileExists(atPath: runtime) {
+            defaults.set(runtime, forKey: "runtimeFolder")
+            defaults.set("8G", forKey: "diskCache")
+        }
+    }
+}
+
+enum Kapitsa {
+    struct Failure: LocalizedError { let errorDescription: String? }
+
+    /// The copy bundled in Contents/MacOS, else KAPITSA_BIN or an installed one (development builds).
+    static var binary: URL? {
+        if let bundled = Bundle.main.url(forAuxiliaryExecutable: "kapitsa") { return bundled }
+        if let custom = ProcessInfo.processInfo.environment["KAPITSA_BIN"], FileManager.default.isExecutableFile(atPath: custom) {
+            return URL(fileURLWithPath: custom)
+        }
+        return ["/opt/homebrew/bin/kapitsa", "/usr/local/bin/kapitsa"].map(URL.init(fileURLWithPath:))
+            .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+    }
+
+    static var home: URL {
+        if let custom = Prefs.runtimeFolder { return URL(fileURLWithPath: custom) }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache/kapitsa")
+    }
+    static var downloads: URL { home.appendingPathComponent("models") }
+
+    /// Kapitsa writes logs, downloads and caches under its data folder; a folder left behind by a `sudo` run
+    /// (owned by root) makes it quit with "Permission denied". Explain that before starting anything.
+    static func storageProblem() -> String? {
+        let fm = FileManager.default
+        let short = { (url: URL) in url.path.replacingOccurrences(of: fm.homeDirectoryForCurrentUser.path, with: "~") }
+        for folder in [home, home.appendingPathComponent("logs"), home.appendingPathComponent("models")] where fm.fileExists(atPath: folder.path) {
+            if !fm.isWritableFile(atPath: folder.path) {
+                return "Kapitsa cannot write to \(short(folder)) because it is owned by another user. "
+                    + "Run sudo chown -R $(whoami) \(short(home)) in Terminal, or choose a different data location in Settings › Storage."
+            }
+        }
+        return nil
+    }
+
+    /// Kapitsa's terminal output without colour and screen-control codes, including fragments of
+    /// codes split across two reads (e.g. "[?2026h").
+    static func clean(_ line: String) -> String {
+        line.replacingOccurrences(of: #"\x{1B}\[[0-9;?]*[A-Za-z]|\[\?[0-9;]+[hl]"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The line of Kapitsa's output that explains a failure, if any.
+    static func reason(in lines: [String]) -> String? {
+        let markers = ["fatal", "error", "permission denied", "can't", "can’t", "insufficient memory", "no such"]
+        return lines.last { line in
+            let lower = line.lowercased()
+            return lower.hasPrefix("kapitsa:") || markers.contains(where: lower.contains)
+        }?.replacingOccurrences(of: "[kapitsa] ", with: "")
+    }
+
+    /// The user's login-shell PATH, so agents installed by npm, Homebrew or pipx are found from the GUI.
+    static let loginPath: String = {
+        let fallback = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let result = try? runSync("/bin/zsh", ["-lc", "print -rn -- $PATH"], timeout: 5)
+        let extras = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
+                      "/opt/homebrew/bin", "/usr/local/bin"]
+        let found = (result?.code == 0 ? result?.output : nil).flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+        return (found.split(separator: ":").map(String.init) + extras).reduce(into: [String]()) {
+            if !$0.contains($1) { $0.append($1) }
+        }.joined(separator: ":")
+    }()
+
+    static func environment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = loginPath
+        // A bundled binary must never replace itself inside the signed app.
+        env["KAPITSA_NO_AUTO_UPDATE"] = "1"
+        if let custom = Prefs.runtimeFolder {
+            let root = URL(fileURLWithPath: custom)
+            for name in ["tmp", "cache", "huggingface/hub"] {
+                try? FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true)
+            }
+            env["KAPITSA_HOME"] = custom
+            env["HF_HOME"] = root.appendingPathComponent("huggingface").path
+            env["HF_HUB_CACHE"] = root.appendingPathComponent("huggingface/hub").path
+            env["XDG_CACHE_HOME"] = root.appendingPathComponent("cache").path
+            env["TMPDIR"] = root.appendingPathComponent("tmp").path
+        }
+        // APFS clones are impossible elsewhere; ask the importer for a real copy.
+        if !isAPFS(home) { env["KAPITSA_IMPORT_COPY"] = "1" }
+        return env
+    }
+
+    static func isAPFS(_ url: URL) -> Bool {
+        var probe = url
+        while !FileManager.default.fileExists(atPath: probe.path) && probe.path != "/" { probe.deleteLastPathComponent() }
+        var info = statfs()
+        guard statfs(probe.path, &info) == 0 else { return true }
+        let name = withUnsafeBytes(of: info.f_fstypename) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return name == "apfs"
+    }
+
+    /// ExFAT and other non-Mac volumes keep "._" metadata files that Kapitsa would read as weights.
+    /// Such folders are presented through a view of symbolic links to the real files only.
+    static func loadPath(for path: String) -> String {
+        let fm = FileManager.default
+        let names = rawNames(path)
+        guard names.contains(where: { $0.hasPrefix("._") }) else { return path }
+        let view = AppPaths.folder("model-links")
+            .appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent + "-" + ModelScanner.identity(path).prefix(8))
+        try? fm.createDirectory(at: view, withIntermediateDirectories: true)
+        let wanted = Set(names.filter { !$0.hasPrefix(".") })
+        for name in wanted {
+            let link = view.appendingPathComponent(name)
+            let target = URL(fileURLWithPath: path).appendingPathComponent(name).path
+            if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != target {
+                try? fm.removeItem(at: link)
+                try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
+            }
+        }
+        for name in (try? fm.contentsOfDirectory(atPath: view.path)) ?? [] where !wanted.contains(name) {
+            try? fm.removeItem(at: view.appendingPathComponent(name))
+        }
+        return view.path
+    }
+
+    /// Directory entries as Kapitsa sees them; FileManager hides "._" AppleDouble files on ExFAT.
+    static func rawNames(_ path: String) -> [String] {
+        guard let directory = opendir(path) else { return [] }
+        defer { closedir(directory) }
+        var names: [String] = []
+        while let entry = readdir(directory) {
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            if name != "." && name != ".." { names.append(name) }
+        }
+        return names
+    }
+
+    /// An always-clean view for `kapitsa bench`, with the paired drafter where Kapitsa looks for one (<model>/dflash2).
+    static func benchView(for model: LocalModel) -> String {
+        let fm = FileManager.default
+        let view = AppPaths.folder("model-links/bench").appendingPathComponent(model.name + "-" + ModelScanner.identity(model.path).prefix(8))
+        try? fm.createDirectory(at: view, withIntermediateDirectories: true)
+        let wanted = Set(rawNames(model.path).filter { !$0.hasPrefix(".") })
+        for name in (try? fm.contentsOfDirectory(atPath: view.path)) ?? [] where !wanted.contains(name) && name != "dflash2" {
+            try? fm.removeItem(at: view.appendingPathComponent(name))
+        }
+        for name in wanted {
+            let link = view.appendingPathComponent(name), target = model.path + "/" + name
+            if (try? fm.destinationOfSymbolicLink(atPath: link.path)) != target {
+                try? fm.removeItem(at: link)
+                try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
+            }
+        }
+        let draft = view.appendingPathComponent("dflash2")
+        if !wanted.contains("dflash2") {
+            try? fm.removeItem(at: draft)
+            if !model.drafter.isEmpty { try? fm.createSymbolicLink(atPath: draft.path, withDestinationPath: loadPath(for: model.drafter)) }
+        }
+        return view.path
+    }
+
+    /// `kapitsa` on the user's PATH, running this app's copy with this app's storage settings.
+    static var commandURL: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/kapitsa") }
+    static let commandMarker = "# Installed by Kapitsa Library"
+
+    static var commandState: String {
+        let path = commandURL.path
+        guard FileManager.default.fileExists(atPath: path) else { return "missing" }
+        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        return text.contains(commandMarker) ? (text.contains(binary?.path ?? "\0") ? "installed" : "outdated") : "foreign"
+    }
+
+    static func installCommand() throws {
+        guard let binary else { throw Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        if commandState == "foreign" {
+            throw Failure(errorDescription: "\(commandURL.path) already exists and was not installed by this app. Remove it first if you want this app's Kapitsa there.")
+        }
+        var script = "#!/bin/zsh\n\(commandMarker). Runs the Kapitsa bundled in the app.\n"
+        script += "export KAPITSA_NO_AUTO_UPDATE=1\n"
+        if let custom = Prefs.runtimeFolder { script += "export KAPITSA_HOME=\(Agents.quote(custom))\n" }
+        script += "exec \(Agents.quote(binary.path)) \"$@\"\n"
+        try FileManager.default.createDirectory(at: commandURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try script.write(to: commandURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: commandURL.path)
+    }
+
+    static func version() -> String {
+        guard let binary, let result = try? runSync(binary.path, ["--version"], env: environment(), timeout: 10) else { return "Not found" }
+        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func fitLabel(gigabytes: Double) -> String {
+        let ram = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+        // One threshold for badges and recommendations: weights within two-thirds of memory leave room for context.
+        if gigabytes <= ram * 0.66 { return "Fits in memory" }
+        if gigabytes < ram * 0.85 { return "Tight fit" }
+        return "Exceeds memory"
+    }
+
+    struct Output { let code: Int32; let output: String }
+
+    @discardableResult
+    static func runSync(_ executable: String, _ arguments: [String], env: [String: String]? = nil,
+                        directory: URL? = nil, timeout: TimeInterval) throws -> Output {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        if let env { process.environment = env }
+        if let directory { process.currentDirectoryURL = directory }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        let deadline = DispatchTime.now() + timeout
+        let reader = DispatchQueue.global()
+        var data = Data()
+        let done = DispatchSemaphore(value: 0)
+        reader.async { data = pipe.fileHandleForReading.readDataToEndOfFile(); done.signal() }
+        if done.wait(timeout: deadline) == .timedOut {
+            process.terminate()
+            throw Failure(errorDescription: "\(URL(fileURLWithPath: executable).lastPathComponent) \(arguments.first ?? "") timed out")
+        }
+        process.waitUntilExit()
+        return Output(code: process.terminationStatus, output: String(decoding: data, as: UTF8.self))
+    }
+
+    static func run(_ arguments: [String], timeout: TimeInterval) async throws -> Output {
+        guard let binary else { throw Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        return try await Task.detached { try runSync(binary.path, arguments, env: environment(), timeout: timeout) }.value
+    }
+}
+
+/// A long-running kapitsa command (pull, import) whose output is streamed and which can be cancelled.
+@MainActor
+final class StreamingCommand: ObservableObject {
+    @Published var running = false
+    @Published var lines: [String] = []
+    @Published var exitCode: Int32?
+    private var process: Process?
+
+    func start(_ arguments: [String], finished: @escaping (Int32) -> Void = { _ in }) throws {
+        guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Kapitsa Library.") }
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = arguments
+        process.environment = Kapitsa.environment()
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let text = String(decoding: handle.availableData, as: UTF8.self)
+            guard !text.isEmpty else { return }
+            // Progress bars redraw with carriage returns; keep the newest state of each line.
+            let parts = text.replacingOccurrences(of: "\r", with: "\n").split(separator: "\n").map(String.init)
+            Task { @MainActor in
+                guard let self else { return }
+                self.lines.append(contentsOf: parts.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+                if self.lines.count > 400 { self.lines.removeFirst(self.lines.count - 400) }
+            }
+        }
+        process.terminationHandler = { [weak self] process in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            Task { @MainActor in
+                self?.running = false
+                self?.exitCode = process.terminationStatus
+                finished(process.terminationStatus)
+            }
+        }
+        lines = []
+        exitCode = nil
+        running = true
+        try process.run()
+        self.process = process
+    }
+
+    func cancel() {
+        if let process, process.isRunning { process.interrupt() }
+    }
+}

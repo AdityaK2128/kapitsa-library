@@ -1,0 +1,28 @@
+# Build output
+Kapitsa Library.app/
+dist/
+
+# Local-only: links into a model drive, caches
+model-links/
+__pycache__/
+.DS_Store
+
+# Per-run benchmark logs (local paths); results and raw JSON are kept
+benchmarks/logs/
+
+# Notes unrelated to this project
+ChessGame-*.txt
+
+# Local copy of the Kapitsa engine used for builds (see build-library-app.sh)
+vendor/
+
+# The author's own pre-app terminal tools, SSD notes and benchmark runs (kept locally, not published)
+/*.command
+/kapitsa-menu
+/kapitsa-ssd
+/kapitsa_*.py
+/scripts/bench_ssd.py
+/scripts/bench_report.py
+/tests/
+/benchmarks/
+/docs/extreme4tb-setup.md

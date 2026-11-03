@@ -1,0 +1,302 @@
+import CryptoKit
+import Foundation
+
+enum ModelStatus: String, Codable {
+    case verified, candidate, importable = "import", unsupported, incomplete, companion
+
+    var order: Int { [.verified, .candidate, .importable, .unsupported, .incomplete, .companion].firstIndex(of: self)! }
+}
+
+struct LocalModel: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let path: String
+    let folder: String
+    let library: String
+    var format = "MLX"
+    var architecture = "unknown"
+    var size: Int64 = 0
+    var status = ModelStatus.unsupported
+    var reason = ""
+    var drafter = ""
+    var nativeContext: Int?
+    var contexts: [String] = []
+    var targetSignature: [Int]?
+    var drafterSignature: [Int]?
+
+    var loadable: Bool { status == .verified || status == .candidate }
+    var available: Bool { loadable || status == .importable }
+    var verified: Bool { status == .verified }
+    var sizeLabel: String { String(format: "%.2f GB", Double(size) / 1e9) }
+    var statusLabel: String {
+        switch status {
+        case .verified: return "Verified"
+        case .candidate: return "Compatible"
+        case .importable: return "Requires Conversion"
+        case .companion: return "Companion File"
+        case .incomplete: return "Incomplete"
+        case .unsupported: return "Unsupported"
+        }
+    }
+    func contextLabel(_ value: String) -> String {
+        guard value == "max" else { return value.uppercased() }
+        guard let limit = nativeContext else { return "Maximum" }
+        return (limit >= 1_048_576 ? "\(limit / 1_048_576)M" : "\(limit / 1024)K") + " (Max)"
+    }
+}
+
+/// Classifies model folders and GGUF files the way Kapitsa 0.2.26 accepts them, without loading weights.
+enum ModelScanner {
+    static let qwenTypes: Set<String> = ["qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen4_exp", "qwen4_exp_text"]
+    static let otherTypes: Set<String> = ["nemotron_h", "flint", "dory"]
+    static let otherClasses = ["NemotronH", "Dory", "Flint", "Clover"]
+    static let ggufArchitectures: Set<String> = ["qwen35", "qwen35moe", "flint"]
+    static let contexts: [(String, Int)] = [("8k", 8192), ("32k", 32768), ("64k", 65536), ("128k", 131072)]
+    static let skipped: Set<String> = ["hf-cache", "kapitsa-runtime", "node_modules", "__pycache__", "prefix-cache", "huggingface"]
+
+    static func identity(_ path: String) -> String {
+        SHA256.hash(data: Data(path.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func scan(libraries: [String], verified: [String: RegistryEntry]) -> [LocalModel] {
+        var seen = Set<String>(), rows: [LocalModel] = []
+        for library in libraries {
+            for url in candidates(in: URL(fileURLWithPath: library)) {
+                let key = url.resolvingSymlinksInPath().path
+                guard seen.insert(key).inserted else { continue }
+                rows.append(describe(url, library: library, verified: verified))
+            }
+        }
+        pairDrafters(&rows)
+        return rows.sorted { ($0.status.order, $0.name.lowercased()) < ($1.status.order, $1.name.lowercased()) }
+    }
+
+    static func candidates(in root: URL) -> [URL] {
+        let fm = FileManager.default
+        var found: [URL] = []
+        if fm.fileExists(atPath: root.appendingPathComponent("config.json").path) { found.append(root) }
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                         options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return found }
+        for case let url as URL in walker {
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDirectory {
+                if skipped.contains(url.lastPathComponent) || walker.level >= 6 { walker.skipDescendants(); continue }
+                if fm.fileExists(atPath: url.appendingPathComponent("config.json").path) { found.append(url) }
+            } else if url.pathExtension.lowercased() == "gguf" {
+                found.append(url)
+            }
+        }
+        return found
+    }
+
+    static func describe(_ url: URL, library: String, verified: [String: RegistryEntry]) -> LocalModel {
+        let rootPath = URL(fileURLWithPath: library).standardizedFileURL.path
+        var relative = url.standardizedFileURL.path
+        if relative.hasPrefix(rootPath) { relative = String(relative.dropFirst(rootPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        var row = LocalModel(id: identity(url.path), name: url.lastPathComponent, path: url.path,
+                             folder: relative.isEmpty ? url.lastPathComponent : relative, library: library)
+        let fm = FileManager.default
+        if url.pathExtension.lowercased() == "gguf" {
+            row.format = "GGUF"
+            row.size = ((try? fm.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
+            let lower = url.lastPathComponent.lowercased()
+            if lower.contains("mmproj") || lower.contains("imatrix") {
+                row.status = .companion
+                row.reason = "Vision projector or calibration data, not a standalone model."
+                return row
+            }
+            do { row.architecture = try GGUFHeader.architecture(of: url) } catch {
+                row.status = .incomplete; row.reason = error.localizedDescription; return row
+            }
+            if ggufArchitectures.contains(row.architecture) {
+                row.status = .importable
+                row.reason = "Requires a one-time conversion. The preview validates the GGUF format first."
+            } else {
+                row.reason = "Architecture not supported by Kapitsa."
+            }
+            return row
+        }
+        let config = readJSON(url.appendingPathComponent("config.json")) ?? [:]
+        row.architecture = config["model_type"] as? String ?? "unknown"
+        let files = (try? fm.contentsOfDirectory(atPath: url.path)) ?? []
+        let weights = files.filter { $0.hasSuffix(".safetensors") && !$0.hasPrefix(".") }
+        row.size = weights.reduce(Int64(0)) { total, name in
+            total + (((try? fm.attributesOfItem(atPath: url.appendingPathComponent(name).path)[.size]) as? NSNumber)?.int64Value ?? 0)
+        }
+        let classes = (config["architectures"] as? [String]) ?? []
+        if classes.contains(where: { $0.contains("Draft") }) || url.lastPathComponent.lowercased().contains("dflash") {
+            row.status = .companion
+            row.reason = "Speculative-decoding drafter for a matching model."
+            row.drafterSignature = drafterSignature(config)
+            return row
+        }
+        guard let kind = family(config) else {
+            row.reason = "Architecture not supported by Kapitsa."
+            return row
+        }
+        let index = readJSON(url.appendingPathComponent("model.safetensors.index.json"))
+        let shards = Set(((index?["weight_map"] as? [String: String]) ?? [:]).values)
+        let missing = shards.filter { !fm.fileExists(atPath: url.appendingPathComponent($0).path) }.sorted()
+        if weights.isEmpty || !files.contains("tokenizer.json") || !missing.isEmpty {
+            row.status = .incomplete
+            row.reason = "Missing weights, tokenizer or indexed shards" + (missing.isEmpty ? "." : ": " + missing.prefix(2).joined(separator: ", "))
+            return row
+        }
+        if kind == "qwen", let problem = quantizationError(config) {
+            row.reason = problem
+            return row
+        }
+        row.status = .candidate
+        row.reason = kind == "qwen" ? "Supported architecture and quantization. Verified on first load."
+                                    : "Supported architecture. Tensor formats are validated on load."
+        if let entry = verified[url.path] {
+            row.status = .verified
+            row.reason = "Verified on this Mac" + (entry.date.map { " · \($0)" } ?? "")
+        }
+        let text = (config["text_config"] as? [String: Any]) ?? config
+        // Kapitsa assumes 128K when a config states no limit.
+        let native = (text["max_position_embeddings"] as? Int) ?? 131072
+        row.nativeContext = native
+        row.contexts = contexts.filter { $0.1 <= native }.map(\.0) + ["max"]
+        row.targetSignature = targetSignature(config)
+        return row
+    }
+
+    static func family(_ config: [String: Any]) -> String? {
+        let type = config["model_type"] as? String ?? ""
+        if qwenTypes.contains(type) { return "qwen" }
+        let classes = ((config["architectures"] as? [String]) ?? []).joined(separator: " ")
+        if otherTypes.contains(type) || otherClasses.contains(where: { classes.contains($0) }) { return "other" }
+        return nil
+    }
+
+    /// MLX affine layouts Kapitsa's Qwen kernels accept.
+    static func quantizationError(_ config: [String: Any]) -> String? {
+        let q = (config["quantization"] ?? config["quantization_config"]) as? [String: Any] ?? [:]
+        func format(_ values: [String: Any], over base: (Int, Int, String)) -> (Int, Int, String) {
+            ((values["bits"] as? Int) ?? base.0, (values["group_size"] as? Int) ?? base.1, (values["mode"] as? String) ?? base.2)
+        }
+        let base = format(q, over: (16, 64, "affine"))
+        let allowed: [Int: Set<Int>] = [3: [64], 4: [32, 64], 5: [64, 128], 6: [64], 8: [64, 128], 16: [64]]
+        let overrides = q.values.compactMap { $0 as? [String: Any] }.filter { $0["bits"] != nil }
+        for (bits, group, mode) in [base] + overrides.map({ format($0, over: base) }) {
+            if mode != "affine" { return "Unsupported quantization mode: \(mode)" }
+            if !(allowed[bits]?.contains(group) ?? false) { return "Unsupported \(bits)-bit / group-\(group) layout" }
+        }
+        let prefixes = Set(q.keys.filter { $0.hasSuffix(".gate_proj") || $0.hasSuffix(".up_proj") }.map { String($0[..<$0.lastIndex(of: ".")!]) })
+        for prefix in prefixes {
+            let gate = format(q[prefix + ".gate_proj"] as? [String: Any] ?? [:], over: base)
+            let up = format(q[prefix + ".up_proj"] as? [String: Any] ?? [:], over: base)
+            if gate != up { return "Dense gate/up projections have different quantization formats" }
+        }
+        return nil
+    }
+
+    static func targetSignature(_ config: [String: Any]) -> [Int]? {
+        let text = (config["text_config"] as? [String: Any]) ?? config
+        let values = [text["num_hidden_layers"], text["hidden_size"], text["vocab_size"] ?? config["vocab_size"]].compactMap { $0 as? Int }
+        return values.count == 3 ? values : nil
+    }
+
+    /// A DFlash drafter names the target's layer count; width and vocabulary must match too.
+    static func drafterSignature(_ config: [String: Any]) -> [Int]? {
+        guard config["dflash_config"] != nil else { return nil }
+        let values = [config["num_target_layers"], config["hidden_size"], config["vocab_size"]].compactMap { $0 as? Int }
+        return values.count == 3 ? values : nil
+    }
+
+    static func pairDrafters(_ rows: inout [LocalModel]) {
+        var drafters: [[Int]: [String]] = [:]
+        for row in rows { if let sig = row.drafterSignature { drafters[sig, default: []].append(row.path) } }
+        for index in rows.indices where rows[index].loadable {
+            if let sig = rows[index].targetSignature, let matches = drafters[sig], matches.count == 1 {
+                rows[index].drafter = matches[0]
+            }
+        }
+    }
+
+    static func readJSON(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+}
+
+/// Reads a GGUF file's general.architecture without touching tensor data.
+enum GGUFHeader {
+    struct Failure: LocalizedError { let errorDescription: String? }
+
+    static func architecture(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        func bytes(_ count: Int) throws -> Data {
+            let data = try handle.read(upToCount: count) ?? Data()
+            if data.count != count { throw Failure(errorDescription: "Incomplete GGUF header") }
+            return data
+        }
+        func u32() throws -> UInt32 { try bytes(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian }
+        func u64() throws -> UInt64 { try bytes(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.littleEndian }
+        func skip(_ count: UInt64) throws { try handle.seek(toOffset: try handle.offset() + count) }
+        func string(keep: Bool = true) throws -> String {
+            let size = try u64()
+            if size > 128 * 1024 * 1024 { throw Failure(errorDescription: "Invalid GGUF metadata length") }
+            if !keep { try skip(size); return "" }
+            return String(decoding: try bytes(Int(size)), as: UTF8.self)
+        }
+        let sizes: [UInt32: UInt64] = [0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8]
+        func skipValue(_ kind: UInt32) throws {
+            switch kind {
+            case 8: _ = try string(keep: false)
+            case 9:
+                let subtype = try u32(), count = try u64()
+                if let size = sizes[subtype] { try skip(size * count) }
+                else if subtype == 8 && count < 1_000_000 { for _ in 0..<count { _ = try string(keep: false) } }
+                else { throw Failure(errorDescription: "Unsupported GGUF metadata array") }
+            default:
+                guard let size = sizes[kind] else { throw Failure(errorDescription: "Unknown GGUF metadata type") }
+                try skip(size)
+            }
+        }
+        guard try bytes(4) == Data("GGUF".utf8), [2, 3].contains(try u32()) else {
+            throw Failure(errorDescription: "Not a supported GGUF header")
+        }
+        _ = try u64()  // tensor count
+        let count = try u64()
+        if count > 100_000 { throw Failure(errorDescription: "Invalid GGUF metadata count") }
+        for _ in 0..<count {
+            let key = try string(), kind = try u32()
+            if key == "general.architecture" && kind == 8 { return try string() }
+            try skipValue(kind)
+        }
+        return "unknown"
+    }
+}
+
+struct RegistryEntry: Codable {
+    var note: String
+    var date: String?
+    var context: String?
+    var reply: String?
+}
+
+/// Models that passed the in-app reply check on this Mac.
+enum Registry {
+    static var url: URL { AppPaths.support.appendingPathComponent("registry.json") }
+
+    static func load() -> [String: RegistryEntry] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: RegistryEntry].self, from: data)) ?? [:]
+    }
+
+    static func move(from old: String, to new: String) {
+        var all = load()
+        guard let entry = all.removeValue(forKey: old) else { return }
+        all[new] = entry
+        if let data = try? JSONEncoder().encode(all) { try? data.write(to: url, options: .atomic) }
+    }
+
+    static func record(_ path: String, _ entry: RegistryEntry) {
+        var all = load()
+        all[path] = entry
+        if let data = try? JSONEncoder().encode(all) { try? data.write(to: url, options: .atomic) }
+    }
+}
