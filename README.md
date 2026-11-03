@@ -94,6 +94,10 @@ The header of `scripts/package.sh` explains the one-time notary setup. The bundl
 
 Kapitsa Library is free. If it's useful to you, you can support its development on [Ko-fi](https://ko-fi.com/aditya2128).
 
+## License
+
+Kapitsa Library is licensed under the [Apache License 2.0](LICENSE). The bundled Kapitsa engine, the coding agents and the models keep their own licenses (see Credits).
+
 ## Credits
 
 - **Inference engine:** [Kapitsa](https://github.com/nace-ai/kapitsa) by Nace AI, Apache License 2.0. Its license and third-party notices ship in the app at `Contents/Resources/kapitsa-licenses`. Kapitsa Library is an independent front end and is not affiliated with or endorsed by the Kapitsa project.
