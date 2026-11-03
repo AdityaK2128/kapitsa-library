@@ -460,6 +460,12 @@ final class ServerController: ObservableObject {
                                          model: record?.modelName ?? stats.model, client: last.client)
             }
         }
+        // Kapitsa's own per-token figure replaces the config-based estimate for this model from now on.
+        if let kilobytes = stats.kvPerTokenKB, let path = record?.modelPath, Prefs.kvMeasured[path] != kilobytes * 1024 {
+            var measured = Prefs.kvMeasured
+            measured[path] = kilobytes * 1024
+            Prefs.kvMeasured = measured
+        }
         logLines.append(contentsOf: lines)
         if logLines.count > 800 { logLines.removeFirst(logLines.count - 800) }
     }

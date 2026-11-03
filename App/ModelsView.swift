@@ -130,7 +130,8 @@ private struct ModelDetail: View {
     }
 
     private var loadCard: some View {
-        let need = SystemMemory.estimatedNeedGB(model)
+        let tokens = model.contextTokens(store.context)
+        let need = tokens.flatMap { SystemMemory.estimatedNeedGB(model, tokens: $0) } ?? SystemMemory.estimatedNeedGB(model)
         let fit = SystemMemory.fit(needGB: need)
         let warns = fit == .tight || (fit == .reclaims && Prefs.protectMemory)
         return VStack(alignment: .leading, spacing: 14) {
@@ -156,7 +157,9 @@ private struct ModelDetail: View {
                 .help("Tokens per conversation. Larger contexts use more memory.")
                 Spacer(minLength: 0)
             }
-            Label(String(format: "Estimated memory: %.0f GB of %.0f GB", need, SystemMemory.totalGB) + {
+            Label(String(format: "Estimated memory%@: %.1f GB of %.0f GB",
+                         tokens != nil && SystemMemory.kvBytesPerToken(model) != nil ? " at " + model.contextLabel(store.context).replacingOccurrences(of: " (Max)", with: "") : "",
+                         need, SystemMemory.totalGB) + {
                 switch fit {
                 case .comfortable: return ""
                 case .reclaims: return Prefs.protectMemory ? "  ·  More than is free now: close apps, or turn off Memory Protection in Settings"
@@ -165,6 +168,7 @@ private struct ModelDetail: View {
                 }
             }(), systemImage: warns ? "exclamationmark.triangle" : "memorychip")
                 .font(.caption).foregroundStyle(warns ? .orange : .secondary)
+            contextEstimates
             if isLoaded, let usable = server.stats.usableContext {
                 let limited = usable < (server.stats.context ?? usable)
                 Label("Usable context: \(usable.formatted()) tokens" +
@@ -180,6 +184,30 @@ private struct ModelDetail: View {
                 Button("Verify Model") { Task { await store.verify(model) } }
             }
         }.card()
+    }
+
+    /// The estimate for every context option, so the cost of a larger one is visible before loading.
+    @ViewBuilder private var contextEstimates: some View {
+        if let kv = SystemMemory.kvBytesPerToken(model) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 14) {
+                    ForEach(model.contexts, id: \.self) { context in
+                        if let tokens = model.contextTokens(context), let need = SystemMemory.estimatedNeedGB(model, tokens: tokens) {
+                            let fit = SystemMemory.fit(needGB: need)
+                            Text(model.contextLabel(context).replacingOccurrences(of: " (Max)", with: "") + String(format: "  %.1f GB", need))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(fit == .tight ? Color.red : fit == .reclaims && Prefs.protectMemory ? Color.orange : Color.secondary)
+                                .fontWeight(context == store.context ? .semibold : .regular)
+                        }
+                    }
+                }
+                let selected = model.contextTokens(store.context) ?? 0
+                let fits = SystemMemory.tokensThatFit(model)
+                Text("\(kv.bytes / 1024) KB of memory per token of context, " + (kv.measured ? "measured when this model last loaded." : "estimated from the model’s configuration until it loads.") +
+                     (fits.map { $0 < selected ? " About \(shortTokens($0)) tokens fit in the memory free now; Kapitsa limits the context to that." : "" } ?? ""))
+                    .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private var performanceCard: some View {

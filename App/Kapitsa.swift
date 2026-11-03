@@ -40,6 +40,11 @@ enum Prefs {
         guard let value = defaults.object(forKey: "slots") as? Int else { return 1 }
         return value == 0 ? nil : max(1, value)
     }
+    /// KV-cache bytes per token Kapitsa reported when each model last loaded, by model path.
+    static var kvMeasured: [String: Int] {
+        get { (defaults.dictionary(forKey: "kvBytesPerToken") as? [String: Int]) ?? [:] }
+        set { defaults.set(newValue, forKey: "kvBytesPerToken") }
+    }
     /// Agents' first-request sizes seen on this Mac, by agent id.
     static var agentPrompts: [String: Int] {
         get { (defaults.dictionary(forKey: "agentPromptTokens") as? [String: Int]) ?? [:] }

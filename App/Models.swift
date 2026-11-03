@@ -21,6 +21,8 @@ struct LocalModel: Identifiable, Hashable {
     var drafter = ""
     var nativeContext: Int?
     var contexts: [String] = []
+    /// KV-cache memory per token of conversation, from the config (see `ModelScanner.kvBytesPerToken`).
+    var kvBytesPerToken: Int?
     var targetSignature: [Int]?
     var drafterSignature: [Int]?
 
@@ -38,6 +40,12 @@ struct LocalModel: Identifiable, Hashable {
         case .unsupported: return "Unsupported"
         }
     }
+    /// "64k" → 65,536; "max" → the model's own limit.
+    func contextTokens(_ value: String) -> Int? {
+        if value == "max" { return nativeContext }
+        return Int(value.dropLast()).map { $0 * 1024 }
+    }
+
     func contextLabel(_ value: String) -> String {
         guard value == "max" else { return value.uppercased() }
         guard let limit = nativeContext else { return "Maximum" }
@@ -155,11 +163,36 @@ enum ModelScanner {
         // Kapitsa assumes 128K when a config states no limit.
         let native = (text["max_position_embeddings"] as? Int) ?? 131072
         row.nativeContext = native
+        row.kvBytesPerToken = kvBytesPerToken(text)
         // "Max" only when it is more than the largest preset; a 128K model would otherwise list 128K twice.
         let presets = contexts.filter { $0.1 <= native }
         row.contexts = presets.map(\.0) + (presets.last?.1 == native ? [] : ["max"])
         row.targetSignature = targetSignature(config)
         return row
+    }
+
+    /// Memory each token of a conversation takes in the KV cache: keys and values (2) × layers that keep a cache
+    /// × KV heads × head size × 2 bytes. Hybrid models (Qwen3.5/3.6, Nemotron) cache only their attention layers,
+    /// which is most of the difference between them and dense models. Matches what Kapitsa reports on load.
+    static func kvBytesPerToken(_ text: [String: Any]) -> Int? {
+        guard let layers = text["num_hidden_layers"] as? Int, layers > 0 else { return nil }
+        if let rank = text["kv_lora_rank"] as? Int {
+            // Multi-head latent attention caches one compressed vector per layer instead of keys and values.
+            return layers * (rank + ((text["qk_rope_head_dim"] as? Int) ?? 0)) * 2
+        }
+        var cached = layers
+        if let types = text["layer_types"] as? [String], !types.isEmpty {
+            cached = types.filter { $0 == "full_attention" || $0 == "attention" }.count
+        } else if let interval = text["full_attention_interval"] as? Int, interval > 0 {
+            cached = layers / interval
+        } else if let pattern = text["hybrid_override_pattern"] as? String {
+            cached = pattern.filter { $0 == "*" }.count
+        }
+        let attentionHeads = (text["num_attention_heads"] as? Int) ?? 0
+        guard let heads = (text["num_key_value_heads"] as? Int) ?? (attentionHeads > 0 ? attentionHeads : nil) else { return nil }
+        let headDim = (text["head_dim"] as? Int) ?? (attentionHeads > 0 ? ((text["hidden_size"] as? Int) ?? 0) / attentionHeads : 0)
+        guard cached > 0, heads > 0, headDim > 0 else { return nil }
+        return 2 * cached * heads * headDim * 2
     }
 
     static func family(_ config: [String: Any]) -> String? {

@@ -55,6 +55,26 @@ enum SystemMemory {
         return Double(model.size) / 1_073_741_824 + drafter + 1.5
     }
 
+    /// KV-cache bytes per token: measured by Kapitsa when the model last loaded, else from its config.
+    static func kvBytesPerToken(_ model: LocalModel) -> (bytes: Int, measured: Bool)? {
+        if let measured = Prefs.kvMeasured[model.path] { return (measured, true) }
+        return model.kvBytesPerToken.map { ($0, false) }
+    }
+
+    /// Weights, drafter and buffers, plus one conversation of `tokens`; nil when the per-token cost is unknown.
+    static func estimatedNeedGB(_ model: LocalModel, tokens: Int) -> Double? {
+        guard let kv = kvBytesPerToken(model) else { return nil }
+        let drafter = model.drafter.isEmpty ? 0 : folderWeightsGB(model.drafter)
+        return Double(model.size) / 1_073_741_824 + drafter + 1.0 + Double(kv.bytes) * Double(tokens) / 1_073_741_824
+    }
+
+    /// How many tokens of context fit in the memory Kapitsa may use now, after the weights.
+    static func tokensThatFit(_ model: LocalModel) -> Int? {
+        guard let kv = kvBytesPerToken(model), let base = estimatedNeedGB(model, tokens: 0) else { return nil }
+        let budget = Prefs.protectMemory ? safeBudgetGB() : totalGB * 0.9
+        return max(0, Int((budget - base) * 1_073_741_824 / Double(kv.bytes)))
+    }
+
     static func folderWeightsGB(_ path: String) -> Double {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
         return names.filter { $0.hasSuffix(".safetensors") && !$0.hasPrefix(".") }.reduce(0.0) { total, name in
