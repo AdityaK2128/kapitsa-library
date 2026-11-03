@@ -135,28 +135,23 @@ struct MenuBarContent: View {
 
 /// The app icon's K monogram as a menu bar template glyph: the bob is filled while a model is running.
 enum MenuBarIcon {
+    /// The app icon's loop and point as an 18-point template glyph: the point is filled while a model runs.
     static func image(active: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-            // Map the icon's 1024-point drawing grid onto an 18-point glyph, centred.
-            let scale: CGFloat = 16 / 536, originX: CGFloat = 217.6, originY: CGFloat = 210.5
-            func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: (x - originX) * scale, y: (y - originY) * scale) }
-            func stroke(_ a: NSPoint, _ b: NSPoint, _ width: CGFloat) {
-                let path = NSBezierPath()
-                path.move(to: a); path.line(to: b)
-                path.lineWidth = width; path.lineCapStyle = .round
-                path.stroke()
-            }
+            let center = NSPoint(x: 8.4, y: 8.4), radius: CGFloat = 5.8, point = CGFloat.pi / 4
             NSColor.black.set()
-            NSBezierPath(roundedRect: NSRect(origin: point(318, 262), size: NSSize(width: 96 * scale, height: 500 * scale)),
-                         xRadius: 26 * scale, yRadius: 26 * scale).fill()
-            stroke(point(440, 500), point(660, 290), 92 * scale)
-            stroke(point(424, 520), point(612, 676), 1.5)
-            let radius = 74 * scale
-            let centre = point(646, 706)
+            // Same proportions as the app icon: a ring with a gap where the point is passing.
+            let loop = NSBezierPath()
+            loop.appendArc(withCenter: center, radius: radius, startAngle: (point + 0.64) * 180 / .pi,
+                           endAngle: (point - 0.64 + 2 * .pi) * 180 / .pi)
+            loop.lineWidth = 2.2; loop.lineCapStyle = .round
+            loop.stroke()
+            let dot = NSPoint(x: center.x + radius * cos(point), y: center.y + radius * sin(point)), size: CGFloat = 2.4
+            let rect = NSRect(x: dot.x - size, y: dot.y - size, width: size * 2, height: size * 2)
             if active {
-                NSBezierPath(ovalIn: NSRect(x: centre.x - radius, y: centre.y - radius, width: radius * 2, height: radius * 2)).fill()
+                NSBezierPath(ovalIn: rect).fill()
             } else {
-                let ring = NSBezierPath(ovalIn: NSRect(x: centre.x - radius + 0.6, y: centre.y - radius + 0.6, width: radius * 2 - 1.2, height: radius * 2 - 1.2))
+                let ring = NSBezierPath(ovalIn: rect.insetBy(dx: 0.6, dy: 0.6))
                 ring.lineWidth = 1.2
                 ring.stroke()
             }
