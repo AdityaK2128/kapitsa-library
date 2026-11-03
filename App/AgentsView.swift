@@ -108,6 +108,7 @@ struct AgentsView: View {
 private struct AgentCard: View {
     let agent: AgentInfo
     @ObservedObject var store: AppStore
+    @ObservedObject var server = ServerController.shared
 
     var body: some View {
         let installed = store.agents[agent.id] != nil
@@ -122,6 +123,7 @@ private struct AgentCard: View {
                 if installed { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).help("Installed") }
             }
             Text(agent.summary).font(.callout).foregroundStyle(.secondary).lineLimit(2, reservesSpace: true)
+            if installed { contextNote }
             if installed {
                 HStack(spacing: 8) {
                     Button { store.launch(agent.id) } label: { Label("Open Project…", systemImage: "folder") }
@@ -157,6 +159,20 @@ private struct AgentCard: View {
                 }
             }
         }.frame(minHeight: 196, alignment: .top).card()
+    }
+
+    /// How much context the agent's prompt takes, against the loaded model when there is one.
+    @ViewBuilder private var contextNote: some View {
+        if let fit = store.contextFit(agent.id) {
+            Label(fit.message, systemImage: fit.level == .fits ? "checkmark.circle" : "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(fit.level == .fits ? Color.secondary : Color.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            let (need, measured) = Agents.promptTokens(agent.id)
+            Label("Needs \(measured ? "" : "about ")\(shortTokens(need)) tokens of context for its first request" +
+                  (agent.compactsAt.map { "; works best with \(shortTokens($0)) or more" } ?? "") + ".", systemImage: "text.alignleft")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var version: String {

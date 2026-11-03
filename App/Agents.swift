@@ -9,23 +9,39 @@ struct AgentInfo: Identifiable, Hashable {
     let symbol: String
     let install: String
     let homepage: URL
+    /// Tokens in the agent's first request: its instructions and tool definitions plus a short message.
+    let promptEstimate: Int
+    /// The agent compacts a conversation only once it reaches this many tokens, so less context than this
+    /// can run out before it does.
+    var compactsAt: Int? = nil
 }
 
 enum Agents {
     static let catalog: [AgentInfo] = [
         AgentInfo(id: "claude", name: "Claude Code", maker: "Anthropic", summary: "Anthropic’s agentic coding tool, connected through the Messages API.",
                   symbol: "sparkles", install: "curl -fsSL https://claude.ai/install.sh | bash",
-                  homepage: URL(string: "https://docs.anthropic.com/en/docs/claude-code/overview")!),
+                  homepage: URL(string: "https://docs.anthropic.com/en/docs/claude-code/overview")!,
+                  promptEstimate: 20_000, compactsAt: 100_000),
         AgentInfo(id: "opencode", name: "OpenCode", maker: "SST", summary: "Open-source coding agent with a full-screen terminal interface.",
                   symbol: "chevron.left.forwardslash.chevron.right", install: "curl -fsSL https://opencode.ai/install | bash",
-                  homepage: URL(string: "https://opencode.ai")!),
+                  homepage: URL(string: "https://opencode.ai")!, promptEstimate: 12_100),
         AgentInfo(id: "codex", name: "Codex CLI", maker: "OpenAI", summary: "OpenAI’s coding agent, connected through the Responses API.",
                   symbol: "terminal", install: "npm install -g @openai/codex",
-                  homepage: URL(string: "https://github.com/openai/codex")!),
+                  homepage: URL(string: "https://github.com/openai/codex")!, promptEstimate: 10_000),
         AgentInfo(id: "pi", name: "Pi", maker: "Mario Zechner", summary: "Minimal, extensible coding agent. Launches with thinking disabled for faster responses.",
                   symbol: "pi", install: "curl -fsSL https://pi.dev/install.sh | sh",
-                  homepage: URL(string: "https://pi.dev")!),
+                  homepage: URL(string: "https://pi.dev")!, promptEstimate: 5_600),
     ]
+    // OpenCode 1.19 and Pi 1.4 were measured on Kapitsa 0.2.26; Claude Code and Codex are estimates. Each is
+    // replaced by what this Mac sees on the agent's first launch (`Prefs.agentPrompts`).
+
+    static func info(_ id: String) -> AgentInfo? { catalog.first { $0.id == id } }
+
+    /// The agent's first-request size: measured on this Mac when it has been launched here, else the estimate.
+    static func promptTokens(_ id: String) -> (tokens: Int, measured: Bool) {
+        if let seen = Prefs.agentPrompts[id] { return (seen, true) }
+        return (info(id)?.promptEstimate ?? 10_000, false)
+    }
     static var all: [String] { catalog.map(\.id) }
 
     static func displayName(_ key: String) -> String { catalog.first { $0.id == key }?.name ?? key }

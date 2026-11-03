@@ -53,6 +53,11 @@ struct MainWindow: View {
         .alert("Nearloop", isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
             Button("OK") { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "") }
+        .alert(item: $store.launchWarning) { warning in
+            Alert(title: Text("Not enough context for \(Agents.displayName(warning.agent))"), message: Text(warning.message),
+                  primaryButton: .default(Text("Launch Anyway")) { store.launch(warning.agent, project: warning.project, force: true) },
+                  secondaryButton: .cancel())
+        }
         .sheet(isPresented: $store.showLog) { LogSheet() }
     }
 

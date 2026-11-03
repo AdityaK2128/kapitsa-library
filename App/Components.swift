@@ -2,6 +2,12 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// "44.6K" for 44,573 tokens, "900" below a thousand; context sizes (multiples of 1,024) as "8K", "128K".
+func shortTokens(_ count: Int) -> String {
+    if count >= 1024, count % 1024 == 0 { return "\(count / 1024)K" }
+    return count >= 1000 ? String(format: "%.1fK", Double(count) / 1000).replacingOccurrences(of: ".0K", with: "K") : "\(count)"
+}
+
 /// Spacing and widths shared by every page, so the layout reads as one system.
 enum Metrics {
     static let column: CGFloat = 960

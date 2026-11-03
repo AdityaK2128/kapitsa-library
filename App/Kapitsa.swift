@@ -36,6 +36,11 @@ enum Prefs {
     }()
     static var port: Int { let v = defaults.integer(forKey: "port"); return (1024...65535).contains(v) ? v : 8000 }
     static var slots: Int { max(1, defaults.integer(forKey: "slots")) }
+    /// Agents' first-request sizes seen on this Mac, by agent id.
+    static var agentPrompts: [String: Int] {
+        get { (defaults.dictionary(forKey: "agentPromptTokens") as? [String: Int]) ?? [:] }
+        set { defaults.set(newValue, forKey: "agentPromptTokens") }
+    }
     static var diskCache: String { defaults.string(forKey: "diskCache").flatMap { $0.isEmpty ? nil : $0 } ?? "auto" }
     static var shareOnNetwork: Bool { defaults.bool(forKey: "shareOnNetwork") }
     static var terminal: String { defaults.string(forKey: "terminalApp") ?? "terminal" }

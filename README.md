@@ -11,7 +11,7 @@ A Mac app for running language models locally and using them with coding agents:
 > **Built on Kapitsa.** The engine, its KFlash speculative decoding, the model catalog and the benchmark protocol are the Kapitsa project's work: [github.com/nace-ai/kapitsa](https://github.com/nace-ai/kapitsa). This app is an independent desktop front end for it.
 
 - **Discover** models in Kapitsa's catalog (Qwen3.5, 3.6 and 3.8, NVIDIA Nemotron, Dory, Flint, Clover) or search Hugging Face for compatible MLX models. Each one shows whether it fits your Mac. Downloads show progress and resume after a pause.
-- **Start an agent** in a project folder with one click. If no model is running, the app loads your agent model first, then opens the agent in Terminal or Ghostty.
+- **Start an agent** in a project folder with one click. If no model is running, the app loads your agent model first, then opens the agent in Terminal or Ghostty. Before it launches, it checks that the agent's prompt fits the model's context (it learns each agent's real prompt size on your Mac) and warns you when it won't.
 - **Never run out of memory.** Kapitsa is capped below the memory that is free when a model loads, so loading never pushes macOS into swap; a model that doesn't fit is refused with a clear message.
 - **Measure** writing and reading speed, time to first token, tool-call support and peak memory with Kapitsa's own benchmark. The benchmark stops itself if memory pressure turns critical.
 - **Use your existing models.** Add any folders, on any drive; MLX folders and GGUF files are detected from their config and file header. GGUFs can be converted for Kapitsa. Move a model to another folder or drive, or to the Trash, from My Models.

@@ -72,8 +72,27 @@ private struct ServerCard: View {
             if server.owned {
                 Divider()
                 LiveStats(server: server)
+                promptCacheNote
             }
         }.card(padding: 24)
+    }
+
+    /// Kapitsa's SSD prompt cache keeps agents' prompts across model loads; say when it can't.
+    @ViewBuilder private var promptCacheNote: some View {
+        let stats = server.stats
+        if stats.promptCacheNoRoom || (stats.promptCacheLimit?.hasPrefix("0 ") == true && Prefs.diskCache == "auto") {
+            Label("The prompt cache on the SSD is off: the disk has less than 10 GB free. After each model load, agents re-read their whole prompt (several seconds). Free up space, or move Storage to a bigger drive in Settings.",
+                  systemImage: "externaldrive.badge.exclamationmark")
+                .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+        } else if Prefs.diskCache == "0" {
+            Label("The prompt cache on the SSD is off (Settings › Server), so agents re-read their prompt after each model load.", systemImage: "externaldrive")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if let limit = stats.promptCacheLimit {
+            Label("Prompt cache on the SSD: up to \(limit.replacingOccurrences(of: "iB", with: "B"))" +
+                  (stats.promptCacheRestored > 0 ? ", \(stats.promptCacheRestored) conversations restored, so agents pick up without re-reading." : ", so agents pick up without re-reading after a reload."),
+                  systemImage: "externaldrive.badge.checkmark")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder private var subtitle: some View {
@@ -94,11 +113,7 @@ private struct ServerCard: View {
     private func contextSummary(_ record: ServerRecord) -> String {
         let asked = "\(record.context.uppercased()) context"
         guard let usable = server.stats.usableContext, let full = server.stats.context, usable < full else { return asked }
-        return asked + ", " + Self.tokens(usable) + " fits in memory"
-    }
-
-    static func tokens(_ count: Int) -> String {
-        count >= 1000 ? String(format: "%.1fK", Double(count) / 1000).replacingOccurrences(of: ".0K", with: "K") : "\(count)"
+        return asked + ", " + shortTokens(usable) + " fits in memory"
     }
 
     private func speedNote(_ model: LocalModel) -> String {

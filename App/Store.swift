@@ -49,6 +49,39 @@ final class AppStore: ObservableObject {
     @Published private(set) var relocations: [String: Double] = [:]
     /// GGUF files being converted.
     @Published var converting: Set<String> = []
+    /// A launch held back because the agent's prompt doesn't fit the loaded model's context.
+    @Published var launchWarning: LaunchWarning?
+
+    struct LaunchWarning: Identifiable {
+        let id = UUID()
+        let agent: String
+        let project: URL
+        let message: String
+    }
+
+    struct ContextFit {
+        enum Level { case fits, tight, overflow }
+        let level: Level
+        let message: String
+    }
+
+    /// How an agent's prompt sits in the running model's context; nil when no model is loaded by this app.
+    func contextFit(_ agent: String) -> ContextFit? {
+        guard server.owned, server.phase == .ready, let available = server.stats.effectiveContext else { return nil }
+        let (need, measured) = Agents.promptTokens(agent)
+        let name = Agents.displayName(agent), about = measured ? "" : "about "
+        // Room for the user's message and the first reply on top of the agent's own prompt.
+        if available < need + 2_048 {
+            return ContextFit(level: .overflow, message: "\(name)’s first request is \(about)\(shortTokens(need)) tokens, but the loaded model holds \(shortTokens(available)). Load a larger context, or close apps so more memory is left for context.")
+        }
+        if let compacts = Agents.info(agent)?.compactsAt, available < compacts {
+            return ContextFit(level: .tight, message: "\(name) compacts conversations only at \(shortTokens(compacts)) tokens; this model holds \(shortTokens(available)), so a long session can run out of room first.")
+        }
+        if available < need + 16_384 {
+            return ContextFit(level: .tight, message: "Uses \(about)\(shortTokens(need)) of \(shortTokens(available)) tokens, leaving little room for files and conversation.")
+        }
+        return ContextFit(level: .fits, message: "Uses \(about)\(shortTokens(need)) of \(shortTokens(available)) tokens.")
+    }
 
     let server = ServerController.shared
     private var booted = false
@@ -273,7 +306,7 @@ final class AppStore: ObservableObject {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    func launch(_ agent: String, project: URL? = nil) {
+    func launch(_ agent: String, project: URL? = nil, force: Bool = false) {
         guard let project = project ?? chooseProject() else { return }
         guard agents[agent] != nil else {
             errorMessage = "\(Agents.displayName(agent)) is not installed. See Agents for installation."
@@ -292,7 +325,7 @@ final class AppStore: ObservableObject {
                     defer { launching = nil }
                     if !server.running {
                         launching = "Starting \(model.name) for \(Agents.displayName(agent))…"
-                        try server.start(model, context: model.contexts.contains("64k") ? "64k" : (model.contexts.dropLast().last ?? "max"))
+                        try server.start(model, context: agentContext(agent, model))
                     }
                     while server.phase == .starting {
                         try await Task.sleep(nanoseconds: 500_000_000)
@@ -302,10 +335,21 @@ final class AppStore: ObservableObject {
                         return
                     }
                 }
+                if !force, let fit = contextFit(agent), fit.level == .overflow {
+                    launchWarning = LaunchWarning(agent: agent, project: project, message: fit.message)
+                    return
+                }
+                server.measurePrompt(of: agent)
                 try Agents.launch(agent, project: project, port: server.port, apiKey: server.apiKey)
                 notice = "\(Agents.displayName(agent)) launched in \(project.lastPathComponent)."
             } catch { errorMessage = error.localizedDescription }
         }
+    }
+
+    /// The context to load for an agent: 64K suits most; an agent that compacts late gets 128K when the model has it.
+    private func agentContext(_ agent: String, _ model: LocalModel) -> String {
+        if let compacts = Agents.info(agent)?.compactsAt, compacts > 65_536, model.contexts.contains("128k") { return "128k" }
+        return model.contexts.contains("64k") ? "64k" : (model.contexts.dropLast().last ?? "max")
     }
 
     func copy(_ text: String, _ message: String) {

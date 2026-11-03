@@ -32,6 +32,10 @@ struct LogStats {
     /// The longest conversation that fits in Kapitsa's memory budget, and what each token of it costs.
     var usableContext: Int?
     var kvPerTokenKB: Int?
+    /// Kapitsa's SSD prompt cache: its size cap, conversations restored at load, and whether the disk is too full.
+    var promptCacheLimit: String?
+    var promptCacheRestored = 0
+    var promptCacheNoRoom = false
     var lastLine = ""
 
     /// The context a conversation can actually use: Kapitsa's fit, else the configured context.
@@ -49,6 +53,7 @@ struct LogStats {
     private static let request = regex(#"\[kapitsa\] (?:chat|messages|responses): prompt (\d+) \(cached (\d+)\) in ([\d.]+|[-–]) ms.*?, (\d+) tokens in ([\d.]+) ms \(([\d.]+) tok/s\), ([^,]+)"#)
     private static let engine = regex(#"engine ready: ([^,]+), context (\d+), [^,]+, ([^,]+)"#)
     private static let memory = regex(#"memory: ([\d.]+ GB) allocated.*?budget ([\d.]+ GB)"#)
+    private static let promptCache = regex(#"SSD prefix cache: .*?, up to ([\d.]+ [KMGT]iB).*?: (\d+) conversations? taken back"#)
     private static let cycle = regex(#"([\d.]+) tok/cycle"#)
     private static let fit = regex(#"one conversation up to (\d+) of (\d+) tokens"#)
     private static let perToken = regex(#"\((\d+) KB per token\)"#)
@@ -69,6 +74,8 @@ struct LogStats {
         if let g = Self.groups(Self.memory, line) { allocated = g[0]; budget = g[1] }
         if let g = Self.groups(Self.fit, line) { usableContext = Int(g[0]) }
         if let g = Self.groups(Self.perToken, line) { kvPerTokenKB = Int(g[0]) }
+        if let g = Self.groups(Self.promptCache, line) { promptCacheLimit = g[0]; promptCacheRestored = Int(g[1]) ?? 0 }
+        if line.contains("SSD prefix cache: no room") { promptCacheNoRoom = true }
         if let range = line.range(of: "drafter: ") { drafter = String(line[range.upperBound...].prefix { $0 != "(" }).trimmingCharacters(in: .whitespaces) }
         guard let g = Self.groups(Self.request, line) else { return false }
         let stat = RequestStat(id: nextID, prompt: Int(g[0]) ?? 0, cached: Int(g[1]) ?? 0,
@@ -204,6 +211,10 @@ final class ServerController: ObservableObject {
     private var swapAtStart = 0.0
     private var terminal: FileHandle?
     private var lastClient = ""
+    /// An agent just launched by the app: its first sizeable request is recorded as its prompt size.
+    private var measuring: (agent: String, since: Date)?
+
+    func measurePrompt(of agent: String) { measuring = (agent, Date()) }
 
     private var process: Process?
     private var logOffset: UInt64 = 0
@@ -435,6 +446,13 @@ final class ServerController: ObservableObject {
         let lines = String(decoding: data[...end], as: UTF8.self).split(separator: "\n").map(String.init)
         for line in lines {
             if stats.consume(line), var last = stats.requests.popLast() {
+                // A title or summary request is small; the agent's real first turn carries its whole prompt.
+                if let (agent, since) = measuring, Date().timeIntervalSince(since) < 900, last.prompt >= 2_000 {
+                    var seen = Prefs.agentPrompts
+                    seen[agent] = last.prompt
+                    Prefs.agentPrompts = seen
+                    measuring = nil
+                }
                 last.client = lastClient.isEmpty ? "—" : lastClient
                 stats.requests.append(last)
             }
