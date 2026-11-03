@@ -13,13 +13,22 @@ struct HomeView: View {
             ServerCard(store: store, server: server)
             if store.runnable.isEmpty && !store.scanning { GetStarted(store: store) }
             VStack(alignment: .leading, spacing: 14) {
-                SectionHeader(title: "Coding Agents", detail: agentDetail)
+                SectionHeader(title: "Coding Agents", detail: agentDetail) {
+                    Button("All Agents") { store.page = .agents }.buttonStyle(.link)
+                }
                 if let launching = store.launching {
                     HStack(spacing: 8) { ProgressView().controlSize(.small); Text(launching).foregroundStyle(.secondary) }
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 14)], spacing: 14) {
                     ForEach(Agents.catalog) { AgentLaunchTile(agent: $0, store: store) }
                 }
+            }
+            VStack(alignment: .leading, spacing: 14) {
+                SectionHeader(title: "Activity")
+                HStack(alignment: .top, spacing: 14) {
+                    TodayCard(store: store).frame(maxHeight: .infinity, alignment: .top).card()
+                    TasksSummaryCard(store: store).frame(maxHeight: .infinity, alignment: .top).card()
+                }.fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 14) {
                 SectionHeader(title: "System")
@@ -240,12 +249,63 @@ private struct ConnectCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("API Endpoint", systemImage: "link").font(.headline)
-            CopyRow(label: "Base URL", value: "http://127.0.0.1:\(server.port)/v1")
+            Label("Connect Other Apps", systemImage: "link").font(.headline)
+            CopyRow(label: "OpenAI URL", value: "http://127.0.0.1:\(server.port)/v1")
+            CopyRow(label: "Anthropic URL", value: "http://127.0.0.1:\(server.port)")
             CopyRow(label: "API Key", value: server.apiKey.isEmpty ? "local" : server.apiKey)
             CopyRow(label: "Model ID", value: server.record?.apiId)
             Text("OpenAI and Anthropic compatible: Chat Completions, Responses and Messages.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// Today's tokens at a glance; the full history is on Usage.
+private struct TodayCard: View {
+    @ObservedObject var store: AppStore
+    @ObservedObject var usage = UsageStore.shared
+
+    var body: some View {
+        let today = usage.usage(on: Date()) ?? DayUsage()
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Today", systemImage: "chart.bar.xaxis").font(.headline)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(compactTokens(today.total)).font(.system(size: 28, weight: .bold)).monospacedDigit()
+                Text("tokens").foregroundStyle(.secondary)
+            }
+            Text("\(today.requests) requests  ·  \(usage.currentStreak)-day streak").font(.caption).foregroundStyle(.secondary)
+            Button("View Usage") { store.page = .usage }.buttonStyle(.link)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// What background tasks are doing; the queue itself is on Tasks.
+private struct TasksSummaryCard: View {
+    @ObservedObject var store: AppStore
+    @ObservedObject var runner = TaskRunner.shared
+
+    var body: some View {
+        let running = runner.tasks.first { $0.state == .running }
+        let waiting = runner.tasks.filter { $0.state == .queued }.count
+        let review = runner.tasks.filter { $0.state == .review && !$0.changedFiles.isEmpty }.count
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Tasks", systemImage: "checklist").font(.headline)
+            if let running {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(running.title).lineLimit(1)
+                }
+            }
+            Text(summary(running: running != nil, waiting: waiting, review: review))
+                .font(running == nil && waiting == 0 && review == 0 ? .callout : .caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(review > 0 ? "Review Changes" : "Open Tasks") { store.page = .tasks }.buttonStyle(.link)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func summary(running: Bool, waiting: Int, review: Int) -> String {
+        let parts = [waiting > 0 ? "\(waiting) waiting" : nil, review > 0 ? "\(review) ready to review" : nil].compactMap { $0 }
+        if !parts.isEmpty { return parts.joined(separator: "  ·  ") }
+        return running ? "Nothing else queued." : "No tasks. Give an agent a job to do in the background and review it later."
     }
 }

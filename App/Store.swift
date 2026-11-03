@@ -2,30 +2,40 @@ import AppKit
 import SwiftUI
 
 enum Page: String, CaseIterable, Identifiable {
-    case home, discover, models, agents, tasks, usage, benchmarks
+    // Sidebar order: what's happening now and what happened, then the models, then the work agents do with them.
+    case home, usage, models, discover, benchmarks, agents, tasks
     var id: String { rawValue }
     var title: String {
         switch self {
         case .home: return "Home"
-        case .discover: return "Discover"
-        case .models: return "My Models"
-        case .agents: return "Agents"
-        case .tasks: return "Tasks"
         case .usage: return "Usage"
+        case .models: return "Library"
+        case .discover: return "Discover"
         case .benchmarks: return "Benchmarks"
+        case .agents: return "Coding Agents"
+        case .tasks: return "Tasks"
         }
     }
     var symbol: String {
         switch self {
         case .home: return "house"
-        case .discover: return "sparkle.magnifyingglass"
+        case .usage: return "chart.bar.xaxis"
         case .models: return "square.stack.3d.up"
+        case .discover: return "sparkle.magnifyingglass"
+        case .benchmarks: return "gauge.with.dots.needle.67percent"
         case .agents: return "terminal"
         case .tasks: return "checklist"
-        case .usage: return "chart.bar.xaxis"
-        case .benchmarks: return "gauge.with.dots.needle.67percent"
         }
     }
+    /// The sidebar group; nil for the overview pages at the top.
+    var section: String? {
+        switch self {
+        case .home, .usage: return nil
+        case .models, .discover, .benchmarks: return "Models"
+        case .agents, .tasks: return "Agents"
+        }
+    }
+    static let sections = ["Models", "Agents"]
 }
 
 /// App-wide state shared by the main window and the menu bar.
@@ -313,7 +323,7 @@ final class AppStore: ObservableObject {
     func launch(_ agent: String, project: URL? = nil, force: Bool = false) {
         guard let project = project ?? chooseProject() else { return }
         guard agents[agent] != nil else {
-            errorMessage = "\(Agents.displayName(agent)) is not installed. See Agents for installation."
+            errorMessage = "\(Agents.displayName(agent)) is not installed. See Coding Agents to install it."
             page = .agents
             return
         }

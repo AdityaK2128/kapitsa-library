@@ -7,23 +7,21 @@ struct AgentsView: View {
     @AppStorage("agentModelPath") private var agentModelPath = ""
 
     var body: some View {
-        PageScaffold(title: "Agents", subtitle: "Launch coding agents against the local model. If no model is running, the default model loads first.") {
+        PageScaffold(title: "Coding Agents", subtitle: "Set up and launch coding agents on the local model. If no model is running, the default model loads first.") {
             modelCard
             if let launching = store.launching {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text(launching).foregroundStyle(.secondary) }
             }
             VStack(alignment: .leading, spacing: 14) {
-                SectionHeader(title: "Coding Agents", detail: "Opens in \(terminalName)")
+                SectionHeader(title: "Agents", detail: "Opens in \(terminalName)")
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 16, alignment: .top)], spacing: 16) {
                     ForEach(Agents.catalog) { AgentCard(agent: $0, store: store) }
                 }
             }
             VStack(alignment: .leading, spacing: 14) {
-                SectionHeader(title: "Integrations")
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 16, alignment: .top)], spacing: 16) {
-                    terminalCard
-                    otherAppsCard
-                }
+                SectionHeader(title: "From the Terminal",
+                              detail: "Other apps connect with the address and key shown on Home.")
+                terminalCard
             }
         }
         .onAppear { commandState = Kapitsa.commandState }
@@ -91,18 +89,9 @@ struct AgentsView: View {
                 Text("~/.local/bin is not on your PATH. Add `export PATH=\"$HOME/.local/bin:$PATH\"` to ~/.zshrc.")
                     .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
-        }.frame(minHeight: 170, alignment: .top).card()
+        }.frame(maxWidth: .infinity, alignment: .leading).card()
     }
 
-    private var otherAppsCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("API Endpoints", systemImage: "link").font(.headline)
-            CopyRow(label: "OpenAI Base URL", value: "http://127.0.0.1:\(server.port)/v1")
-            CopyRow(label: "Anthropic Base URL", value: "http://127.0.0.1:\(server.port)")
-            CopyRow(label: "API Key", value: server.apiKey.isEmpty ? "local" : server.apiKey)
-            CopyRow(label: "Model ID", value: server.record?.apiId)
-        }.frame(minHeight: 170, alignment: .top).card()
-    }
 }
 
 private struct AgentCard: View {

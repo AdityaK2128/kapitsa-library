@@ -42,7 +42,7 @@ struct TasksView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("New Task").font(.headline)
             if available.isEmpty {
-                Text("Tasks need OpenCode, Pi or Codex CLI, which can work without a terminal. Install one from the Agents page. (Claude Code can’t run unattended on local models yet.)")
+                Text("Tasks need OpenCode, Pi or Codex CLI, which can work without a terminal. Install one from Coding Agents. (Claude Code can’t run unattended on local models yet.)")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 HStack(spacing: 10) {

@@ -451,7 +451,7 @@ struct ImportSheet: View {
         .padding(22).frame(width: 720, height: 460)
         .task {
             if FileManager.default.fileExists(atPath: Kapitsa.downloads.appendingPathComponent(name).path) {
-                preview = "Already converted. Available under Downloaded in My Models."
+                preview = "Already converted. Available under Downloaded in Library."
                 return
             }
             do {

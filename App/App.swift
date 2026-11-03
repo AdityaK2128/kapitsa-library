@@ -11,9 +11,11 @@ struct MainWindow: View {
     var body: some View {
         NavigationSplitView {
             List(selection: Binding(get: { store.page }, set: { if let page = $0 { store.page = page } })) {
-                ForEach(Page.allCases) { page in
-                    Label(page.title, systemImage: page.symbol).tag(page)
-                        .badge(page == .tasks ? tasks.active : 0)
+                ForEach(Page.allCases.filter { $0.section == nil }) { row($0) }
+                ForEach(Page.sections, id: \.self) { section in
+                    Section(section) {
+                        ForEach(Page.allCases.filter { $0.section == section }) { row($0) }
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom) { sidebarFooter }
@@ -63,6 +65,10 @@ struct MainWindow: View {
                   secondaryButton: .cancel())
         }
         .sheet(isPresented: $store.showLog) { LogSheet() }
+    }
+
+    private func row(_ page: Page) -> some View {
+        Label(page.title, systemImage: page.symbol).tag(page).badge(page == .tasks ? tasks.active : 0)
     }
 
     private var sidebarFooter: some View {
