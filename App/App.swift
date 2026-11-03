@@ -27,6 +27,7 @@ struct MainWindow: View {
                     case .models: ModelsView()
                     case .agents: AgentsView()
                     case .tasks: TasksView()
+                    case .usage: UsageView()
                     case .benchmarks: BenchmarksView()
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)

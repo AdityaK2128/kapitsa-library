@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 enum Page: String, CaseIterable, Identifiable {
-    case home, discover, models, agents, tasks, benchmarks
+    case home, discover, models, agents, tasks, usage, benchmarks
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -11,6 +11,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .models: return "My Models"
         case .agents: return "Agents"
         case .tasks: return "Tasks"
+        case .usage: return "Usage"
         case .benchmarks: return "Benchmarks"
         }
     }
@@ -21,6 +22,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .models: return "square.stack.3d.up"
         case .agents: return "terminal"
         case .tasks: return "checklist"
+        case .usage: return "chart.bar.xaxis"
         case .benchmarks: return "gauge.with.dots.needle.67percent"
         }
     }

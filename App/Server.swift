@@ -456,6 +456,8 @@ final class ServerController: ObservableObject {
                 }
                 last.client = lastClient.isEmpty ? "—" : lastClient
                 stats.requests.append(last)
+                UsageStore.shared.record(prompt: last.prompt, cached: last.cached, output: last.output,
+                                         model: record?.modelName ?? stats.model, client: last.client)
             }
         }
         logLines.append(contentsOf: lines)
