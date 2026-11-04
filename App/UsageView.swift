@@ -173,10 +173,12 @@ private struct ActivityGrid: View {
 
     private var weekdayLabels: some View {
         VStack(alignment: .leading, spacing: gap) {
+            // Mon, Wed and Fri, as on GitHub, wherever the week starts in this locale.
             ForEach(0..<7, id: \.self) { row in
-                let index = (calendar.firstWeekday - 1 + row) % 7
-                Text(row % 2 == 1 ? calendar.shortWeekdaySymbols[index] : "")
-                    .font(.system(size: 9)).foregroundStyle(.secondary).frame(width: labelWidth, height: cell, alignment: .leading)
+                let weekday = (calendar.firstWeekday - 1 + row) % 7   // 0 is Sunday
+                Text([1, 3, 5].contains(weekday) ? calendar.shortWeekdaySymbols[weekday] : "")
+                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                    .frame(width: labelWidth, height: cell, alignment: .leading)
             }
         }
     }
