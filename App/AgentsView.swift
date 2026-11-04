@@ -17,10 +17,7 @@ struct AgentsView: View {
                       text: "Click Open Project and pick a folder. Nearloop loads the default model and opens a terminal with the agent already connected to it."),
                 .init(symbol: "lock.shield", title: "Private and free",
                       text: "These agents normally talk to a paid cloud model. Here they use the model on your Mac: no account, no per-token cost, and your code stays local."),
-            ]) {
-                GuideNote(symbol: "bubble.left.and.text.bubble.right", lead: "Coding Agents or Tasks?",
-                          text: "Here you chat with an agent live and watch it work. In Tasks you hand off a job, let it run in the background, and review the result later.")
-            }
+            ])
             modelCard
             if let launching = store.launching {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text(launching).foregroundStyle(.secondary) }

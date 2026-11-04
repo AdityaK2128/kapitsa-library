@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 enum Page: String, CaseIterable, Identifiable {
-    // Sidebar order: what's happening now and what happened, then the models, then the work agents do with them.
-    case home, usage, models, discover, benchmarks, agents, tasks
+    // Sidebar order: what's happening now and what happened, then the models, then the agents that use them.
+    case home, usage, models, discover, benchmarks, agents
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -13,7 +13,6 @@ enum Page: String, CaseIterable, Identifiable {
         case .discover: return "Discover"
         case .benchmarks: return "Benchmarks"
         case .agents: return "Coding Agents"
-        case .tasks: return "Tasks"
         }
     }
     var symbol: String {
@@ -24,7 +23,6 @@ enum Page: String, CaseIterable, Identifiable {
         case .discover: return "sparkle.magnifyingglass"
         case .benchmarks: return "gauge.with.dots.needle.67percent"
         case .agents: return "terminal"
-        case .tasks: return "checklist"
         }
     }
     /// The sidebar group; nil for the overview pages at the top.
@@ -32,7 +30,7 @@ enum Page: String, CaseIterable, Identifiable {
         switch self {
         case .home, .usage: return nil
         case .models, .discover, .benchmarks: return "Models"
-        case .agents, .tasks: return "Agents"
+        case .agents: return "Agents"
         }
     }
     static let sections = ["Models", "Agents"]

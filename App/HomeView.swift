@@ -25,10 +25,7 @@ struct HomeView: View {
             }
             VStack(alignment: .leading, spacing: 14) {
                 SectionHeader(title: "Activity")
-                HStack(alignment: .top, spacing: 14) {
-                    TodayCard(store: store).frame(maxHeight: .infinity, alignment: .top).card()
-                    TasksSummaryCard(store: store).frame(maxHeight: .infinity, alignment: .top).card()
-                }.fixedSize(horizontal: false, vertical: true)
+                TodayCard(store: store).card()
             }
             VStack(alignment: .leading, spacing: 14) {
                 SectionHeader(title: "System")
@@ -276,36 +273,5 @@ private struct TodayCard: View {
             Text("\(today.requests) requests  ·  \(usage.currentStreak)-day streak").font(.caption).foregroundStyle(.secondary)
             Button("View Usage") { store.page = .usage }.buttonStyle(.link)
         }.frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// What background tasks are doing; the queue itself is on Tasks.
-private struct TasksSummaryCard: View {
-    @ObservedObject var store: AppStore
-    @ObservedObject var runner = TaskRunner.shared
-
-    var body: some View {
-        let running = runner.tasks.first { $0.state == .running }
-        let waiting = runner.tasks.filter { $0.state == .queued }.count
-        let review = runner.tasks.filter { $0.state == .review && !$0.changedFiles.isEmpty }.count
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Tasks", systemImage: "checklist").font(.headline)
-            if let running {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(running.title).lineLimit(1)
-                }
-            }
-            Text(summary(running: running != nil, waiting: waiting, review: review))
-                .font(running == nil && waiting == 0 && review == 0 ? .callout : .caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(review > 0 ? "Review Changes" : "Open Tasks") { store.page = .tasks }.buttonStyle(.link)
-        }.frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func summary(running: Bool, waiting: Int, review: Int) -> String {
-        let parts = [waiting > 0 ? "\(waiting) waiting" : nil, review > 0 ? "\(review) ready to review" : nil].compactMap { $0 }
-        if !parts.isEmpty { return parts.joined(separator: "  ·  ") }
-        return running ? "Nothing else queued." : "No tasks. Give an agent a job to do in the background and review it later."
     }
 }

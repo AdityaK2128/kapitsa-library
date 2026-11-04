@@ -535,20 +535,3 @@ struct HowItWorks<Footer: View>: View {
 extension HowItWorks where Footer == EmptyView {
     init(_ title: String, key: String, steps: [Step]) { self.init(title, key: key, steps: steps) { EmptyView() } }
 }
-
-/// A plain-language aside inside a guide: a small icon, a bold lead and its explanation.
-struct GuideNote: View {
-    let symbol: String
-    let lead: String
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 20)
-            (Text(lead + " ").fontWeight(.semibold) + Text(text).foregroundColor(.secondary))
-                .font(.callout).fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
-    }
-}
