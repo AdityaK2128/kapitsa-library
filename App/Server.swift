@@ -154,7 +154,8 @@ final class DashboardReader {
     init(publish: @escaping (LiveActivity) -> Void) { self.publish = publish }
 
     private static func regex(_ pattern: String) -> NSRegularExpression { try! NSRegularExpression(pattern: pattern) }
-    private static let promptLine = regex(#"(\S.*?)\s+·\s+([\d,]+) prompt, (\d+)% cached"#)
+    /// "pi  ·  5.4K prompt, 0% cached": Kapitsa shortens counts from 1,000 up (5.4K, 27K, 1.2M).
+    private static let promptLine = regex(#"(\S.*?)\s+·\s+([\d.,]+)\s*([KkMm]?)\s+prompt,\s*(\d+)% cached"#)
     private static let writing = regex(#"writing ([\d.]+) tok/s"#)
     private static let reading = regex(#"reading ([\d.]+) tok/s"#)
     private static let progress = regex(#"([\d,]+) tokens\s+·\s+([\d.]+)s"#)
@@ -192,6 +193,13 @@ final class DashboardReader {
         }
     }
 
+    /// "5.4K" → 5,400; "12,345" → 12,345; "1.2M" → 1,200,000. Shortened counts are within half a unit.
+    static func count(_ number: String, unit: String) -> Int? {
+        guard let value = Double(number.replacingOccurrences(of: ",", with: "")) else { return nil }
+        let scale: Double = ["k": 1_000, "m": 1_000_000][unit.lowercased()] ?? 1
+        return Int((value * scale).rounded())
+    }
+
     static func parse(_ frame: String) -> LiveActivity {
         let text = frame.replacingOccurrences(of: #"\x{1B}\[[0-9;?]*[A-Za-z]|\x{1B}\][^\x{07}]*\x{07}"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"[\x{2800}-\x{28FF}│╭╮╰╯]"#, with: " ", options: .regularExpression)
@@ -199,14 +207,14 @@ final class DashboardReader {
         live.memory = groups(memory, text)?[0]
         if let g = groups(promptLine, text) {
             live.client = g[0].trimmingCharacters(in: .whitespaces)
-            live.prompt = Int(g[1].replacingOccurrences(of: ",", with: ""))
-            live.cachedPercent = Int(g[2])
+            live.prompt = count(g[1], unit: g[2])
+            live.cachedPercent = Int(g[3])
             live.state = .reading
         }
         if let g = groups(reading, text) { live.speed = Double(g[0]); live.state = .reading }
         if let g = groups(writing, text) { live.speed = Double(g[0]); live.state = .writing }
         if let g = groups(progress, text) {
-            live.tokens = Int(g[0].replacingOccurrences(of: ",", with: ""))
+            live.tokens = count(g[0], unit: "")
             live.elapsed = Double(g[1])
         }
         if live.state == .idle && text.contains("waiting for the engine") { live.state = .waiting }
