@@ -48,6 +48,8 @@ final class AppStore: ObservableObject {
     @Published private(set) var agentVersions: [String: String] = [:]
     @Published private(set) var catalog: [CatalogFamily] = []
     @Published private(set) var catalogError: String?
+    /// Per family: its Hugging Face repository and the files that speed it up, from Kapitsa's catalog.
+    @Published private(set) var catalogDetails: [String: Catalog.Details] = [:]
     @Published private(set) var benchmarks: [BenchResult] = []
     @Published private(set) var scanning = false
     @Published var selectedModelID: String? = UserDefaults.standard.string(forKey: "selectedModel")
@@ -148,7 +150,36 @@ final class AppStore: ObservableObject {
         do {
             catalog = try await Task.detached { try Catalog.load() }.value
             catalogError = nil
-        } catch { catalogError = error.localizedDescription }
+        } catch { catalogError = error.localizedDescription; return }
+        await loadCatalogDetails()
+    }
+
+    private var loadingDetails = false
+
+    /// Each family's repository and speed-ups, looked up for its default variant. Each lookup asks Hugging Face
+    /// for the current revision, so a few run at a time and a failed one is tried once more; whatever is still
+    /// missing is tried again the next time Discover opens.
+    func loadCatalogDetails() async {
+        guard !loadingDetails else { return }
+        loadingDetails = true
+        defer { loadingDetails = false }
+        for _ in 0..<2 {
+            let wanted = catalog.compactMap { family in family.defaultVariant.map { (family.id, $0, family.about) } }
+                .filter { catalogDetails[$0.0] == nil }
+            if wanted.isEmpty { return }
+            await withTaskGroup(of: (String, Catalog.Details?).self) { group in
+                var queue = wanted[...]
+                func next() {
+                    guard let (id, variant, about) = queue.popFirst() else { return }
+                    group.addTask { (id, Catalog.details(variant, about: about)) }
+                }
+                for _ in 0..<4 { next() }
+                for await (id, details) in group {
+                    if let details { catalogDetails[id] = details }
+                    next()
+                }
+            }
+        }
     }
 
     var recommended: CatalogVariant? { Catalog.recommended(catalog) }

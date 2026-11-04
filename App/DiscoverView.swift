@@ -12,6 +12,7 @@ struct DiscoverView: View {
             }.pickerStyle(.segmented).labelsHidden().fixedSize()
             if source == 0 { CatalogSection(store: store) } else { HuggingFaceSection() }
         }
+        .task { await store.loadCatalogDetails() }
     }
 }
 
@@ -32,12 +33,14 @@ private struct CatalogSection: View {
                 RecommendedCard(family: family, variant: pick)
             }
             if !store.catalog.isEmpty {
-                CodingPicksSection()
-                VStack(alignment: .leading, spacing: 14) {
-                    SectionHeader(title: "All Models", detail: "\(store.catalog.count) model families · sizes shown on disk")
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
-                        ForEach(store.catalog) { FamilyCard(family: $0) }
-                    }
+                // Split by Kapitsa's own description of each family, so a new catalog sorts itself.
+                let coding = store.catalog.filter(Catalog.codingOriented)
+                let others = store.catalog.filter { !Catalog.codingOriented($0) }
+                if !coding.isEmpty {
+                    familyGrid("For Coding Agents", detail: "Models Kapitsa describes for coding, agents or tool calls · sizes shown on disk", coding)
+                }
+                if !others.isEmpty {
+                    familyGrid(coding.isEmpty ? "All Models" : "More Models", detail: "\(others.count) model families · sizes shown on disk", others)
                 }
                 Text("Download location: \((Kapitsa.downloads.path as NSString).abbreviatingWithTildeInPath). Change in Settings › Storage.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -46,10 +49,24 @@ private struct CatalogSection: View {
     }
 }
 
+extension CatalogSection {
+    func familyGrid(_ title: String, detail: String, _ families: [CatalogFamily]) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SectionHeader(title: title, detail: detail)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
+                ForEach(families) { FamilyCard(family: $0) }
+            }
+        }
+    }
+}
+
 private struct FamilyCard: View {
     let family: CatalogFamily
     @ObservedObject var downloads = Downloads.shared
+    @ObservedObject var store = AppStore.shared
     @State private var expanded = false
+
+    var details: Catalog.Details? { store.catalogDetails[family.id] }
 
     var visible: [CatalogVariant] {
         expanded ? family.variants
@@ -61,11 +78,17 @@ private struct FamilyCard: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(family.title).font(.headline)
                 if family.isMoE { Badge(text: "MoE", color: .purple) }
+                ForEach(details?.speedups ?? [], id: \.self) { name in
+                    Badge(text: name, color: .blue).help("Kapitsa drafts ahead with this, so replies come faster")
+                }
                 Spacer()
                 Text(family.alias).font(.caption.monospaced()).foregroundStyle(.tertiary).help("CLI alias: \(family.alias)")
             }
             Text(family.about.prefix(1).uppercased() + family.about.dropFirst())
                 .font(.callout).foregroundStyle(.secondary).lineLimit(2, reservesSpace: true)
+            if let card = details?.modelCard {
+                Link("Model card ↗", destination: card).font(.caption).help(card.absoluteString)
+            }
             Divider()
             VStack(spacing: 12) {
                 ForEach(visible) { variant in
@@ -174,6 +197,7 @@ private struct HuggingFaceRow: View {
                     if let type = model.modelType { Text(type).font(.caption.monospaced()).foregroundStyle(model.likelyCompatible ? .green : .secondary) }
                     Label((model.downloads ?? 0).formatted(.number.notation(.compactName)), systemImage: "arrow.down").foregroundStyle(.secondary)
                     Label("\(model.likes ?? 0)", systemImage: "heart").foregroundStyle(.secondary)
+                    if let card = URL(string: "https://huggingface.co/\(model.id)") { Link("Model card ↗", destination: card) }
                     if let details, details.bytes > 0 {
                         Text(String(format: "%.1f GB", Double(details.bytes) / 1e9)).monospacedDigit().foregroundStyle(.secondary)
                         FitBadge(gigabytes: Double(details.bytes) / 1e9)
