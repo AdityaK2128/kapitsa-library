@@ -31,10 +31,10 @@ struct UsageView: View {
             UsageTile(label: "Tokens", value: compactTokens(all.total),
                  detail: "\(compactTokens(all.prompt)) read · \(compactTokens(all.output)) written")
             UsageTile(label: "Requests", value: all.requests.formatted(),
-                 detail: "\(usage.days.values.filter { $0.total > 0 }.count) days active")
-            UsageTile(label: "Prompt Cache", value: all.prompt > 0 ? String(format: "%.0f%%", Double(all.cached) / Double(all.prompt) * 100) : "—",
+                 detail: days(usage.days.values.filter { $0.total > 0 }.count) + " active")
+            UsageTile(label: "Prompt Cache", value: all.prompt > 0 ? "\(min(100, Int((Double(all.cached) / Double(all.prompt) * 100).rounded())))%" : "—",
                  detail: "\(compactTokens(all.cached)) tokens reused")
-            UsageTile(label: "Streak", value: "\(usage.currentStreak) days", detail: "longest \(usage.longestStreak) days")
+            UsageTile(label: "Streak", value: days(usage.currentStreak), detail: "longest " + days(usage.longestStreak))
             if let busiest = usage.busiestDay {
                 UsageTile(label: "Busiest Day", value: compactTokens(busiest.usage.total),
                      detail: busiest.date.formatted(.dateTime.month(.abbreviated).day().year()))
@@ -100,8 +100,9 @@ private struct ActivityGrid: View {
 
     var body: some View {
         let weeks = self.weeks
-        let thresholds = self.thresholds
-        let year = weeks.joined().compactMap { $0 }.reduce(0) { $0 + (usage.usage(on: $1)?.total ?? 0) }
+        let shown = weeks.joined().compactMap { $0 }.map { usage.usage(on: $0)?.total ?? 0 }
+        let used = shown.filter { $0 > 0 }.sorted()
+        let year = shown.reduce(0, +)
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 Text("\(compactTokens(year)) tokens in the last year").font(.headline)
@@ -118,7 +119,7 @@ private struct ActivityGrid: View {
                                     if let date = weeks[index][row] {
                                         let day = usage.usage(on: date)
                                         RoundedRectangle(cornerRadius: 2.5)
-                                            .fill(color(level(day?.total ?? 0, thresholds)))
+                                            .fill(color(Heatmap.level(day?.total ?? 0, among: used)))
                                             .frame(width: cell, height: cell)
                                             .help(tooltip(date, day))
                                     } else {
@@ -151,17 +152,6 @@ private struct ActivityGrid: View {
         }
     }
 
-    /// Quartiles of the days with any use, so a few heavy days don't wash out the rest.
-    private var thresholds: [Int] {
-        let used = usage.days.values.map(\.total).filter { $0 > 0 }.sorted()
-        guard !used.isEmpty else { return [1, 1, 1] }
-        return [0.25, 0.5, 0.75].map { used[min(used.count - 1, Int(Double(used.count) * $0))] }
-    }
-
-    private func level(_ total: Int, _ thresholds: [Int]) -> Int {
-        guard total > 0 else { return 0 }
-        return 1 + thresholds.filter { total > $0 }.count
-    }
 
     private func color(_ level: Int) -> Color {
         level == 0 ? Color.primary.opacity(0.07) : Color.green.opacity([0, 0.3, 0.5, 0.75, 1][level])
@@ -211,14 +201,16 @@ private struct Breakdown: View {
     let items: [String: Int]
 
     var body: some View {
-        let sorted = items.sorted { $0.value > $1.value }.prefix(6)
-        let top = max(1, sorted.first?.value ?? 1)
+        let ordered = items.filter { $0.value > 0 }.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        let sorted: [(key: String, value: Int)] = ordered.count <= 6 ? ordered.map { ($0.key, $0.value) }
+            : ordered.prefix(5).map { ($0.key, $0.value) } + [("\(ordered.count - 5) others", ordered.dropFirst(5).reduce(0) { $0 + $1.value })]
+        let top = max(1, sorted.map(\.value).max() ?? 1)
         VStack(alignment: .leading, spacing: 10) {
             Label(title, systemImage: symbol).font(.headline)
             if sorted.isEmpty {
                 Text("Nothing yet.").font(.callout).foregroundStyle(.secondary)
             }
-            ForEach(Array(sorted), id: \.key) { name, tokens in
+            ForEach(sorted, id: \.key) { name, tokens in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(name).font(.callout).lineLimit(1).truncationMode(.middle)

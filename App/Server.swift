@@ -93,6 +93,41 @@ struct LogStats {
     }
 }
 
+/// Matches finished requests in the log, which don't name their client, to the client the dashboard showed
+/// while each was in progress. Requests are paired by their exact prompt size, so a request that finishes
+/// while another has started, or that was never on screen, isn't credited to the wrong app.
+struct ClientMatcher {
+    private var seen: [(client: String, prompt: Int)] = []
+    /// Every client seen since the server started.
+    private var everyone: Set<String> = []
+
+    /// A request in progress, from a dashboard frame; each one is noted once.
+    mutating func saw(client: String, prompt: Int) {
+        guard !client.isEmpty, client != "—" else { return }
+        everyone.insert(client)
+        if let last = seen.last, last.client == client, last.prompt == prompt { return }
+        seen.append((client, prompt))
+        if seen.count > 64 { seen.removeFirst(seen.count - 64) }
+    }
+
+    /// The client of a finished request with this prompt size, or "" when none was seen.
+    mutating func client(forPrompt prompt: Int) -> String {
+        // The exact size, else the closest within 5%, in case the dashboard counts a little differently.
+        let close = seen.indices.filter { abs(seen[$0].prompt - prompt) <= max(2, prompt / 20) }
+        guard let index = seen.lastIndex(where: { $0.prompt == prompt })
+                ?? close.min(by: { abs(seen[$0].prompt - prompt) < abs(seen[$1].prompt - prompt) }) else {
+            // Never on screen: only when a single app has used this server is it safe to say which.
+            return everyone.count == 1 ? everyone.first! : ""
+        }
+        let client = seen[index].client
+        // Anything older than the match finished or was missed; drop it with the match.
+        seen.removeFirst(index + 1)
+        return client
+    }
+
+    mutating func reset() { seen = []; everyone = [] }
+}
+
 /// What Kapitsa's terminal dashboard shows at this moment: the request in progress, if any.
 struct LiveActivity: Equatable {
     enum State: Equatable { case idle, waiting, reading, writing }
@@ -210,7 +245,7 @@ final class ServerController: ObservableObject {
     @Published private(set) var live = LiveActivity()
     private var swapAtStart = 0.0
     private var terminal: FileHandle?
-    private var lastClient = ""
+    private var clients = ClientMatcher()
     /// An agent just launched by the app: its first sizeable request is recorded as its prompt size.
     private var measuring: (agent: String, since: Date)?
 
@@ -306,6 +341,7 @@ final class ServerController: ObservableObject {
         stats = LogStats()
         logLines = []
         logOffset = existing
+        clients.reset()
         live = LiveActivity()
         try process.run()
         try? device.close()
@@ -361,7 +397,7 @@ final class ServerController: ObservableObject {
 
     private func update(_ activity: LiveActivity) {
         guard owned else { return }
-        if !activity.client.isEmpty { lastClient = activity.client }
+        if let prompt = activity.prompt { clients.saw(client: activity.client, prompt: prompt) }
         live = activity
     }
 
@@ -401,6 +437,8 @@ final class ServerController: ObservableObject {
         let expected = URL(fileURLWithPath: saved.executable).resolvingSymlinksInPath().path
         guard kill(saved.pid, 0) == 0, Self.executable(of: saved.pid) == expected else { clear(); return }
         record = saved
+        // Lines before this were already counted; reading them again would record their usage twice.
+        logOffset = saved.offset
         phase = .starting
     }
 
@@ -454,7 +492,8 @@ final class ServerController: ObservableObject {
                     Prefs.agentPrompts = seen
                     measuring = nil
                 }
-                last.client = lastClient.isEmpty ? "—" : lastClient
+                let client = clients.client(forPrompt: last.prompt)
+                last.client = client.isEmpty ? "—" : client
                 stats.requests.append(last)
                 UsageStore.shared.record(prompt: last.prompt, cached: last.cached, output: last.output,
                                          model: record?.modelName ?? stats.model, client: last.client)
@@ -466,6 +505,7 @@ final class ServerController: ObservableObject {
             measured[path] = kilobytes * 1024
             Prefs.kvMeasured = measured
         }
+        save()
         logLines.append(contentsOf: lines)
         if logLines.count > 800 { logLines.removeFirst(logLines.count - 800) }
     }

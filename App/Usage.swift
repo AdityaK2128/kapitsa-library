@@ -9,6 +9,26 @@ struct DayUsage: Codable, Equatable {
     var models: [String: Int] = [:]
     var clients: [String: Int] = [:]
     var total: Int { prompt + output }
+    /// Requests whose app the dashboard didn't name.
+    static let unidentified = "Unidentified"
+
+    private enum CodingKeys: String, CodingKey { case requests, prompt, cached, output, models, clients }
+
+    init() {}
+
+    /// Tolerates missing fields, so a file from an older or newer version still loads.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
+        prompt = try c.decodeIfPresent(Int.self, forKey: .prompt) ?? 0
+        cached = try c.decodeIfPresent(Int.self, forKey: .cached) ?? 0
+        output = try c.decodeIfPresent(Int.self, forKey: .output) ?? 0
+        models = try c.decodeIfPresent([String: Int].self, forKey: .models) ?? [:]
+        // Older builds called unidentified requests "Other".
+        var clients = try c.decodeIfPresent([String: Int].self, forKey: .clients) ?? [:]
+        if let other = clients.removeValue(forKey: "Other") { clients[Self.unidentified, default: 0] += other }
+        self.clients = clients
+    }
 }
 
 @MainActor
@@ -28,13 +48,20 @@ final class UsageStore: ObservableObject {
     }()
 
     private init() {
-        if let data = try? Data(contentsOf: Self.url), let saved = try? JSONDecoder().decode([String: DayUsage].self, from: data) {
+        guard let data = try? Data(contentsOf: Self.url) else { return }
+        if let saved = try? JSONDecoder().decode([String: DayUsage].self, from: data) {
             days = saved
+        } else {
+            // Unreadable: set it aside rather than overwrite the history with the next request.
+            let backup = Self.url.deletingPathExtension().appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.moveItem(at: Self.url, to: backup)
         }
     }
 
     /// Adds one finished request.
     func record(prompt: Int, cached: Int, output: Int, model: String, client: String, on date: Date = Date()) {
+        let prompt = max(0, prompt), output = max(0, output), cached = min(max(0, cached), prompt)
+        guard prompt + output > 0 else { return }
         let key = Self.dayFormat.string(from: date)
         var day = days[key] ?? DayUsage()
         day.requests += 1
@@ -43,7 +70,7 @@ final class UsageStore: ObservableObject {
         day.output += output
         let tokens = prompt + output
         if !model.isEmpty { day.models[model, default: 0] += tokens }
-        day.clients[client.isEmpty || client == "—" ? "Other" : client, default: 0] += tokens
+        day.clients[client.isEmpty || client == "—" ? DayUsage.unidentified : client, default: 0] += tokens
         days[key] = day
         if let data = try? JSONEncoder().encode(days) { try? data.write(to: Self.url, options: .atomic) }
     }
@@ -64,7 +91,7 @@ final class UsageStore: ObservableObject {
     var currentStreak: Int {
         let calendar = Calendar.current
         var day = calendar.startOfDay(for: Date())
-        if usage(on: day) == nil { day = calendar.date(byAdding: .day, value: -1, to: day)! }
+        if (usage(on: day)?.total ?? 0) == 0 { day = calendar.date(byAdding: .day, value: -1, to: day)! }
         var count = 0
         while let used = usage(on: day), used.total > 0 {
             count += 1
@@ -86,7 +113,7 @@ final class UsageStore: ObservableObject {
     }
 
     var busiestDay: (date: Date, usage: DayUsage)? {
-        days.max { $0.value.total < $1.value.total }.flatMap { key, usage in Self.dayFormat.date(from: key).map { ($0, usage) } }
+        days.filter { $0.value.total > 0 }.max { $0.value.total < $1.value.total }.flatMap { key, usage in Self.dayFormat.date(from: key).map { ($0, usage) } }
     }
 }
 
@@ -116,7 +143,7 @@ enum TokenComparisons {
     static func headline(_ total: Int) -> String {
         let total = Double(total), work = headlineWork(total)
         if total < tokens(work.words) {
-            return String(format: "about %.0f%% of %@", max(1, total / tokens(work.words) * 100), work.name)
+            return "about " + percent(total / tokens(work.words)) + " of " + work.name
         }
         return "about " + times(total / tokens(work.words)) + " " + work.name
     }
@@ -127,8 +154,13 @@ enum TokenComparisons {
         return works.filter { $0.name != shown && total >= tokens($0.words) * 0.05 && total < tokens($0.words) * 5_000 }
             .suffix(4).reversed().map { work in
                 let ratio = total / tokens(work.words)
-                return ratio >= 1 ? times(ratio) + " " + work.name : String(format: "%.0f%% of %@", ratio * 100, work.name)
+                return ratio >= 1 ? times(ratio) + " " + work.name : percent(ratio) + " of " + work.name
             }
+    }
+
+    /// 1% to 99%: a share just under a whole one reads as 99%, not 100%.
+    private static func percent(_ ratio: Double) -> String {
+        "\(min(99, max(1, Int((ratio * 100).rounded()))))%"
     }
 
     private static func times(_ ratio: Double) -> String {
@@ -160,11 +192,33 @@ enum CloudPrices {
 
 /// "845K", "12.4M", "1.2B".
 func compactTokens(_ count: Int) -> String {
-    let value = Double(count)
-    switch value {
-    case 1_000_000_000...: return String(format: "%.1fB", value / 1_000_000_000).replacingOccurrences(of: ".0B", with: "B")
-    case 1_000_000...: return String(format: "%.1fM", value / 1_000_000).replacingOccurrences(of: ".0M", with: "M")
-    case 1_000...: return String(format: "%.0fK", value / 1_000)
-    default: return "\(count)"
+    let value = Double(max(0, count))
+    // Each unit is chosen after rounding, so 999,999 reads 1M rather than 1000K.
+    if value < 1_000 { return "\(Int(value))" }
+    if (value / 1_000).rounded() < 1_000 { return String(format: "%.0fK", value / 1_000) }
+    if (value / 1_000_000 * 10).rounded() / 10 < 1_000 {
+        return String(format: "%.1fM", value / 1_000_000).replacingOccurrences(of: ".0M", with: "M")
+    }
+    if (value / 1_000_000_000 * 10).rounded() / 10 < 1_000 {
+        return String(format: "%.1fB", value / 1_000_000_000).replacingOccurrences(of: ".0B", with: "B")
+    }
+    return String(format: "%.1fT", value / 1_000_000_000_000).replacingOccurrences(of: ".0T", with: "T")
+}
+
+/// "1 day", "3 days".
+func days(_ count: Int) -> String { count == 1 ? "1 day" : "\(count) days" }
+
+/// How dark a day is drawn in the activity grid.
+enum Heatmap {
+    /// 0 for no use, else 1–4 by rank among the days with use in view (sorted), like GitHub's quartiles: a few
+    /// heavy days don't wash out the rest, the busiest day is always the darkest, and equal days look alike.
+    static func level(_ total: Int, among used: [Int]) -> Int {
+        guard total > 0, !used.isEmpty else { return 0 }
+        guard used.count > 1 else { return 4 }
+        // Days at or below this one, as a share of the others: 0 for the quietest, 1 for the busiest.
+        var low = 0, high = used.count
+        while low < high { let mid = (low + high) / 2; if used[mid] <= total { low = mid + 1 } else { high = mid } }
+        let rank = Double(low - 1) / Double(used.count - 1)
+        return 1 + min(3, Int(rank * 3.999))
     }
 }
