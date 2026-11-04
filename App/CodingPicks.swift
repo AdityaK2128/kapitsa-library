@@ -3,16 +3,8 @@ import SwiftUI
 /// Open coding models from Hugging Face that Kapitsa runs with speculative decoding, picked for agent work.
 /// Each is an MLX build that keeps the model's MTP head (Kapitsa drafts with it), or one paired with a DFlash2
 /// drafter repository that goes into its dflash2/ folder, the layout Kapitsa's own catalog uses. A pick is
-/// listed only once Kapitsa was seen speeding it up. Scores are the makers' published figures.
+/// listed only once Kapitsa was seen speeding it up.
 struct CodingPick: Identifiable {
-    struct Score: Hashable {
-        let benchmark: String
-        let value: Double
-        /// The same benchmark for a well-known model of similar size, for scale.
-        let baseline: Double
-        let baselineName: String
-    }
-
     let id: String          // the model repository, what `kapitsa pull` takes
     let name: String
     let maker: String
@@ -23,7 +15,6 @@ struct CodingPick: Identifiable {
     let drafter: Downloads.Companion?
     let drafterGB: Double
     let license: String
-    let scores: [Score]
     let source: URL
 
     var gigabytes: Double { modelGB + drafterGB }
@@ -48,11 +39,6 @@ enum CodingPicks {
             about: "A dense 9B for coding agents on the Qwen3.5 architecture that codes close to models four times its size. This MLX build keeps the MTP head, so Kapitsa drafts ahead with it.",
             isMoE: false, modelGB: 6.25, drafter: nil, drafterGB: 0,
             license: "MIT",
-            scores: [
-                .init(benchmark: "SWE-bench Verified", value: 70.6, baseline: 53.2, baselineName: "Qwen3.5 9B"),
-                .init(benchmark: "Terminal-Bench 2.1 in Claude Code", value: 47.0, baseline: 18.9, baselineName: "Qwen3.5 9B"),
-                .init(benchmark: "SWE-bench Pro", value: 47.5, baseline: 31.3, baselineName: "Qwen3.5 9B"),
-            ],
             source: URL(string: "https://huggingface.co/ornith-ai/Ornith-1.5-9B")!),
     ]
 }
@@ -62,7 +48,7 @@ struct CodingPicksSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             SectionHeader(title: "More for Coding Agents",
-                          detail: "Open coding models from Hugging Face that Kapitsa speeds up with speculative decoding. Scores are the makers’ published results.")
+                          detail: "Open coding models from Hugging Face that Kapitsa speeds up with speculative decoding.")
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
                 ForEach(CodingPicks.all) { PickCard(pick: $0) }
             }
@@ -86,28 +72,6 @@ private struct PickCard: View {
                 Text(pick.maker).font(.caption).foregroundStyle(.tertiary)
             }
             Text(pick.about).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 7) {
-                ForEach(pick.scores, id: \.self) { score in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(score.benchmark).font(.caption)
-                            Spacer()
-                            Text(String(format: "%.1f", score.value)).font(.caption.weight(.semibold)).monospacedDigit()
-                            Text(String(format: "vs %.1f", score.baseline)).font(.caption).monospacedDigit().foregroundStyle(.tertiary)
-                                .help("\(score.baselineName): \(String(format: "%.1f", score.baseline))")
-                        }
-                        GeometryReader { proxy in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.primary.opacity(0.07))
-                                Capsule().fill(Color.secondary.opacity(0.35)).frame(width: proxy.size.width * score.baseline / 100)
-                                Capsule().fill(Color.accentColor).frame(width: proxy.size.width * score.value / 100).opacity(0.85)
-                            }
-                        }.frame(height: 4)
-                    }
-                }
-                Text("Grey bars: \(Set(pick.scores.map(\.baselineName)).sorted().joined(separator: ", ")) on the same benchmark.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
             Divider()
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
