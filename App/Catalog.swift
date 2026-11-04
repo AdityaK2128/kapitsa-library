@@ -328,6 +328,17 @@ final class Downloads: ObservableObject {
         processes[spec]?.interrupt()
     }
 
+    /// Before the app quits: pauses every download and waits (up to 10 s) for Kapitsa to stop, since a child
+    /// process outlives the app and would keep writing unmanaged. Each resumes from its files on the next launch.
+    func pauseAllAndWait() {
+        for spec in jobs.keys where jobs[spec]?.state == .preparing || jobs[spec]?.state == .running {
+            jobs[spec]?.state = .pausing
+            processes[spec]?.interrupt()
+        }
+        for _ in 0..<100 where processes.values.contains(where: \.isRunning) { usleep(100_000) }
+        for process in processes.values where process.isRunning { process.terminate() }
+    }
+
     func dismiss(_ spec: String) { if processes[spec] == nil { jobs[spec] = nil } }
 
     /// Deletes a model Kapitsa downloaded (`kapitsa rm`).

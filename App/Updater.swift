@@ -157,14 +157,16 @@ final class Updater: ObservableObject {
     func install() {
         guard let release = updateAvailable, let download = release.download else { return }
         if let problem = Self.installProblem { phase = .failed(problem); return }
+        if let work = AppStore.shared.unfinishedFileWork { phase = .failed("\(work). Install the update once it finishes."); return }
         phase = .downloading(0)
         work = Task {
             do {
                 let folder = FileManager.default.temporaryDirectory.appendingPathComponent("nearloop-update-\(UUID().uuidString.prefix(8))")
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 defer { try? FileManager.default.removeItem(at: folder) }
-                let dmg = try await UpdateDownload.run(download, to: folder.appendingPathComponent("Nearloop.dmg")) { [weak self] fraction in
-                    Task { @MainActor in if case .downloading = self?.phase { self?.phase = .downloading(fraction) } }
+                // The updater lives as long as the app, so its progress closure holds it plainly.
+                let dmg = try await UpdateDownload.run(download, to: folder.appendingPathComponent("Nearloop.dmg")) { fraction in
+                    Task { @MainActor in if case .downloading = Updater.shared.phase { Updater.shared.phase = .downloading(fraction) } }
                 }
                 try Task.checkCancellation()
                 phase = .installing
@@ -249,6 +251,11 @@ final class Updater: ObservableObject {
 
     /// Starts a small script that waits for this process to exit, swaps the staged app in, and opens it; then quits.
     private func relaunch(into staged: URL) async throws {
+        // A move or conversion started while the update downloaded would be cut off partway.
+        if let work = AppStore.shared.unfinishedFileWork {
+            try? FileManager.default.removeItem(at: staged)
+            throw Kapitsa.Failure(errorDescription: "\(work). Install the update once it finishes.")
+        }
         let current = Bundle.main.bundleURL
         let backup = current.deletingLastPathComponent().appendingPathComponent(".Nearloop-previous.app")
         let script = """
@@ -277,6 +284,8 @@ final class Updater: ObservableObject {
         let server = ServerController.shared
         if server.owned { server.stopAndWait() }
         BenchmarkRunner.shared.cancel()
+        // Downloads pause, as the update window says, rather than carry on without the app.
+        Downloads.shared.pauseAllAndWait()
         // macOS won't quit while a window has a sheet open, so close this one first.
         showSheet = false
         try? await Task.sleep(for: .milliseconds(500))

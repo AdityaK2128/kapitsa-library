@@ -57,8 +57,8 @@ enum SystemMemory {
 
     /// KV-cache bytes per token: measured by Kapitsa when the model last loaded, else from its config.
     static func kvBytesPerToken(_ model: LocalModel) -> (bytes: Int, measured: Bool)? {
-        if let measured = Prefs.kvMeasured[model.path] { return (measured, true) }
-        return model.kvBytesPerToken.map { ($0, false) }
+        if let measured = Prefs.kvMeasured[model.path], measured > 0 { return (measured, true) }
+        return model.kvBytesPerToken.flatMap { $0 > 0 ? ($0, false) : nil }
     }
 
     /// Weights, drafter and buffers, plus one conversation of `tokens`; nil when the per-token cost is unknown.
@@ -72,7 +72,10 @@ enum SystemMemory {
     static func tokensThatFit(_ model: LocalModel) -> Int? {
         guard let kv = kvBytesPerToken(model), let base = estimatedNeedGB(model, tokens: 0) else { return nil }
         let budget = Prefs.protectMemory ? safeBudgetGB() : totalGB * 0.9
-        return max(0, Int((budget - base) * 1_073_741_824 / Double(kv.bytes)))
+        let tokens = (budget - base) * 1_073_741_824 / Double(kv.bytes)
+        guard tokens.isFinite else { return nil }
+        // Converting a Double outside Int's range would crash; no context comes near either bound.
+        return Int(min(max(0, tokens), 1e15))
     }
 
     static func folderWeightsGB(_ path: String) -> Double {

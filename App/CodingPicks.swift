@@ -28,10 +28,14 @@ struct CodingPick: Identifiable {
 
     var gigabytes: Double { modelGB + drafterGB }
     var folder: URL { Kapitsa.downloads.appendingPathComponent(id.replacingOccurrences(of: "/", with: "--")) }
-    var complete: Bool {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: folder.appendingPathComponent("config.json").path) else { return false }
-        return drafter.map { fm.fileExists(atPath: folder.appendingPathComponent($0.into).appendingPathComponent("config.json").path) } ?? true
+    /// Downloaded once the library scan finds the model loadable (weights, tokenizer and every indexed shard,
+    /// not just a config.json an interrupted download left) and, for a pick with a drafter, paired with a
+    /// drafter in its folder that has weights.
+    @MainActor func complete(in store: AppStore) -> Bool {
+        guard let model = store.model(at: folder.path), model.loadable else { return false }
+        guard let drafter else { return true }
+        let path = folder.appendingPathComponent(drafter.into).path
+        return model.drafter == path && SystemMemory.folderWeightsGB(path) > 0
     }
 }
 
@@ -135,7 +139,8 @@ private struct PickCard: View {
         case .paused?, .failed?:
             Button(job?.state == .paused ? "Resume" : "Retry") { start(bytes) }
         default:
-            if job?.state == .finished || pick.complete {
+            // Download jobs live only in memory; after a restart the scan decides, as for the catalog.
+            if job?.state == .finished || pick.complete(in: store) {
                 Label("Downloaded", systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(.green)
             } else if FileManager.default.fileExists(atPath: pick.folder.path) {
                 Button("Resume") { start(bytes) }.help("Finish the model and its drafter")

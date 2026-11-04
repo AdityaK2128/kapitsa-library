@@ -94,34 +94,40 @@ struct LogStats {
 }
 
 /// Matches finished requests in the log, which don't name their client, to the client the dashboard showed
-/// while each was in progress. Requests are paired by their exact prompt size, so a request that finishes
-/// while another has started, or that was never on screen, isn't credited to the wrong app.
+/// while each was in progress. Requests are paired by prompt size. Requests can finish in any order, so a
+/// match uses up only its own observation; when two apps had requests of that size pending, nobody is credited.
 struct ClientMatcher {
-    private var seen: [(client: String, prompt: Int)] = []
+    private var seen: [(client: String, prompt: Int, at: Date)] = []
     /// Every client seen since the server started.
     private var everyone: Set<String> = []
 
-    /// A request in progress, from a dashboard frame; each one is noted once.
-    mutating func saw(client: String, prompt: Int) {
+    /// A request in progress, from a dashboard frame; each one is noted once and refreshed while on screen.
+    mutating func saw(client: String, prompt: Int, at now: Date = Date()) {
         guard !client.isEmpty, client != "—" else { return }
         everyone.insert(client)
-        if let last = seen.last, last.client == client, last.prompt == prompt { return }
-        seen.append((client, prompt))
+        if let index = seen.lastIndex(where: { $0.client == client && $0.prompt == prompt }) {
+            seen[index].at = now
+            return
+        }
+        seen.append((client, prompt, now))
         if seen.count > 64 { seen.removeFirst(seen.count - 64) }
     }
 
-    /// The client of a finished request with this prompt size, or "" when none was seen.
-    mutating func client(forPrompt prompt: Int) -> String {
-        // The exact size, else the closest within 5%, in case the dashboard counts a little differently.
-        let close = seen.indices.filter { abs(seen[$0].prompt - prompt) <= max(2, prompt / 20) }
-        guard let index = seen.lastIndex(where: { $0.prompt == prompt })
-                ?? close.min(by: { abs(seen[$0].prompt - prompt) < abs(seen[$1].prompt - prompt) }) else {
+    /// The client of a finished request with this prompt size, or "" when it can't be told.
+    mutating func client(forPrompt prompt: Int, at now: Date = Date()) -> String {
+        // A request last on screen half an hour ago finished unlogged (cancelled, say) or was matched already.
+        seen.removeAll { now.timeIntervalSince($0.at) > 1800 }
+        // The exact size, else within 5%, since the dashboard shortens counts ("5.4K").
+        var candidates = seen.indices.filter { seen[$0].prompt == prompt }
+        if candidates.isEmpty { candidates = seen.indices.filter { abs(seen[$0].prompt - prompt) <= max(2, prompt / 20) } }
+        guard !candidates.isEmpty else {
             // Never on screen: only when a single app has used this server is it safe to say which.
             return everyone.count == 1 ? everyone.first! : ""
         }
-        let client = seen[index].client
-        // Anything older than the match finished or was missed; drop it with the match.
-        seen.removeFirst(index + 1)
+        let clients = Set(candidates.map { seen[$0].client })
+        guard clients.count == 1, let client = clients.first else { return "" }
+        let closest = candidates.min { abs(seen[$0].prompt - prompt) < abs(seen[$1].prompt - prompt) }!
+        seen.remove(at: closest)
         return client
     }
 
@@ -233,6 +239,8 @@ struct ServerRecord: Codable {
     var port: Int
     var log: String
     var offset: UInt64 = 0
+    /// Where this run's lines begin in the log, which keeps earlier runs' lines above them.
+    var logStart: UInt64?
     /// The key the server was started with; it stays in force until the next load.
     var apiKey: String?
 }
@@ -356,7 +364,8 @@ final class ServerController: ObservableObject {
         self.process = process
         self.terminal = terminal
         record = ServerRecord(pid: process.processIdentifier, executable: binary.path, modelPath: model.path,
-                              modelName: model.name, apiId: apiId, context: context, port: port, log: log.path, apiKey: key)
+                              modelName: model.name, apiId: apiId, context: context, port: port, log: log.path,
+                              logStart: existing, apiKey: key)
         save()
         phase = .starting
         trackEngine(of: process.processIdentifier)
@@ -385,7 +394,10 @@ final class ServerController: ObservableObject {
         guard let record, owned else { return }
         kill(record.pid, SIGINT)
         for _ in 0..<60 where kill(record.pid, 0) == 0 { usleep(100_000) }
-        if kill(record.pid, 0) == 0 { kill(record.pid, SIGTERM) }
+        if kill(record.pid, 0) == 0 { kill(record.pid, SIGTERM); usleep(300_000) }
+        // The main thread was blocked above, so the exit handler hasn't read the last requests: read them
+        // now, or the next load starts after them and they never reach Usage.
+        readLog(record.log)
         clear()
     }
 
@@ -447,6 +459,8 @@ final class ServerController: ObservableObject {
         record = saved
         // Lines before this were already counted; reading them again would record their usage twice.
         logOffset = saved.offset
+        // A record from before logStart was saved: this run's settings are near the end of what was read.
+        replaySettings(saved.log, from: saved.logStart ?? (saved.offset > 8_000_000 ? saved.offset - 8_000_000 : 0), to: saved.offset)
         phase = .starting
     }
 
@@ -493,18 +507,12 @@ final class ServerController: ObservableObject {
         let lines = String(decoding: data[...end], as: UTF8.self).split(separator: "\n").map(String.init)
         for line in lines {
             if stats.consume(line), var last = stats.requests.popLast() {
-                // A title or summary request is small; the agent's real first turn carries its whole prompt.
-                if let (agent, since) = measuring, Date().timeIntervalSince(since) < 900, last.prompt >= 2_000 {
-                    var seen = Prefs.agentPrompts
-                    seen[agent] = last.prompt
-                    Prefs.agentPrompts = seen
-                    measuring = nil
-                }
                 let client = clients.client(forPrompt: last.prompt)
                 last.client = client.isEmpty ? "—" : client
                 stats.requests.append(last)
                 UsageStore.shared.record(prompt: last.prompt, cached: last.cached, output: last.output,
                                          model: record?.modelName ?? stats.model, client: last.client)
+                measure(last)
             }
         }
         // Kapitsa's own per-token figure replaces the config-based estimate for this model from now on.
@@ -516,6 +524,41 @@ final class ServerController: ObservableObject {
         save()
         logLines.append(contentsOf: lines)
         if logLines.count > 800 { logLines.removeFirst(logLines.count - 800) }
+    }
+
+    /// Records the launched agent's first sizeable request as its prompt size. Only a request the dashboard
+    /// showed as that agent's counts, so another app's conversation finishing meanwhile isn't taken for it.
+    private func measure(_ request: RequestStat) {
+        guard let (agent, since) = measuring else { return }
+        guard Date().timeIntervalSince(since) < 900 else { measuring = nil; return }
+        // A title or summary request is small; the agent's real first turn carries its whole prompt.
+        // Kapitsa names clients from their User-Agent ("claude", "opencode", "pi", "codex…").
+        guard request.prompt >= 2_000, request.client.lowercased().hasPrefix(agent.lowercased()) else { return }
+        var seen = Prefs.agentPrompts
+        seen[agent] = request.prompt
+        Prefs.agentPrompts = seen
+        measuring = nil
+    }
+
+    /// After re-attaching, the lines of this run before the saved offset were counted already, but the
+    /// engine's settings (context, memory budget, drafter, prompt cache) are in them too. Read them again
+    /// for those and for the request history, without recording any usage twice.
+    private func replaySettings(_ path: String, from start: UInt64, to end: UInt64) {
+        guard end > start, let handle = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? handle.close() }
+        try? handle.seek(toOffset: start)
+        // The settings come first in a run; a long run's later requests aren't needed for them.
+        let data = handle.readData(ofLength: Int(min(end - start, 8_000_000)))
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        var replayed = LogStats()
+        for line in lines {
+            if replayed.consume(line), var last = replayed.requests.popLast() {
+                last.client = "—"
+                replayed.requests.append(last)
+            }
+        }
+        stats = replayed
+        logLines = Array(lines.suffix(800))
     }
 
     // MARK: - System queries

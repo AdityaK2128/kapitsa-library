@@ -57,6 +57,7 @@ struct UpdateSheet: View {
         var parts = ["Nearloop quits, replaces itself and opens again."]
         if server.owned { parts.append("The running model stops; load it again afterwards.") }
         if !downloads.active.isEmpty { parts.append("Downloads in progress pause and can be resumed.") }
+        if let work = AppStore.shared.unfinishedFileWork { parts.append("\(work); install once it finishes.") }
         return parts.joined(separator: " ")
     }
 

@@ -111,7 +111,7 @@ final class AppStore: ObservableObject {
         await scan()
         await loadCatalog()
         if Prefs.autoStart, !server.running, let path = Prefs.lastModel, let model = model(at: path) {
-            load(model, context: model.contexts.contains(Prefs.lastContext) ? Prefs.lastContext : (model.contexts.dropLast().last ?? "max"))
+            load(model, context: model.contexts.contains(Prefs.lastContext) ? Prefs.lastContext : model.largestPreset)
         }
     }
 
@@ -159,7 +159,7 @@ final class AppStore: ObservableObject {
 
     func clampContext() {
         guard let model = selected, model.loadable, !model.contexts.contains(context) else { return }
-        context = model.contexts.dropLast().last ?? "max"
+        context = model.largestPreset
     }
 
     func addLibrary() {
@@ -199,6 +199,14 @@ final class AppStore: ObservableObject {
         }
         if converting.contains(model.path) { return "Wait for the conversion to finish." }
         if relocations[model.path] != nil { return "This model is being moved." }
+        return nil
+    }
+
+    /// File work that quitting would cut off partway: a move to another folder (across volumes, a copy), or a
+    /// GGUF conversion, whose process would carry on unmanaged.
+    var unfinishedFileWork: String? {
+        if !relocations.isEmpty { return "A model is being moved to another folder" }
+        if !converting.isEmpty { return "A GGUF model is being converted" }
         return nil
     }
 
@@ -368,7 +376,7 @@ final class AppStore: ObservableObject {
     /// The context to load for an agent: 64K suits most; an agent that compacts late gets 128K when the model has it.
     private func agentContext(_ agent: String, _ model: LocalModel) -> String {
         if let compacts = Agents.info(agent)?.compactsAt, compacts > 65_536, model.contexts.contains("128k") { return "128k" }
-        return model.contexts.contains("64k") ? "64k" : (model.contexts.dropLast().last ?? "max")
+        return model.contexts.contains("64k") ? "64k" : model.largestPreset
     }
 
     func copy(_ text: String, _ message: String) {

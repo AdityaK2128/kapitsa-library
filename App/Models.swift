@@ -46,6 +46,10 @@ struct LocalModel: Identifiable, Hashable {
         return Int(value.dropLast()).map { $0 * 1024 }
     }
 
+    /// The largest preset context ("8k" … "128k"), the default when no other is chosen. "max" can be a
+    /// million tokens, so it is only the answer for a model smaller than every preset.
+    var largestPreset: String { contexts.last { $0 != "max" } ?? contexts.last ?? "max" }
+
     func contextLabel(_ value: String) -> String {
         guard value == "max" else { return value.uppercased() }
         guard let limit = nativeContext else { return "Maximum" }
@@ -174,11 +178,20 @@ enum ModelScanner {
     /// Memory each token of a conversation takes in the KV cache: keys and values (2) × layers that keep a cache
     /// × KV heads × head size × 2 bytes. Hybrid models (Qwen3.5/3.6, Nemotron) cache only their attention layers,
     /// which is most of the difference between them and dense models. Matches what Kapitsa reports on load.
+    /// Every value comes from the model's config, so anything not positive or that overflows means unknown (nil).
     static func kvBytesPerToken(_ text: [String: Any]) -> Int? {
+        func product(_ values: [Int]) -> Int? {
+            guard values.allSatisfy({ $0 > 0 }) else { return nil }
+            return values.reduce(Optional(1)) { total, value in
+                total.flatMap { let (result, overflow) = $0.multipliedReportingOverflow(by: value); return overflow ? nil : result }
+            }
+        }
         guard let layers = text["num_hidden_layers"] as? Int, layers > 0 else { return nil }
         if let rank = text["kv_lora_rank"] as? Int {
             // Multi-head latent attention caches one compressed vector per layer instead of keys and values.
-            return layers * (rank + ((text["qk_rope_head_dim"] as? Int) ?? 0)) * 2
+            let rope = max(0, (text["qk_rope_head_dim"] as? Int) ?? 0)
+            guard rank > 0, rope <= Int.max - rank else { return nil }
+            return product([layers, rank + rope, 2])
         }
         var cached = layers
         if let types = text["layer_types"] as? [String], !types.isEmpty {
@@ -191,8 +204,7 @@ enum ModelScanner {
         let attentionHeads = (text["num_attention_heads"] as? Int) ?? 0
         guard let heads = (text["num_key_value_heads"] as? Int) ?? (attentionHeads > 0 ? attentionHeads : nil) else { return nil }
         let headDim = (text["head_dim"] as? Int) ?? (attentionHeads > 0 ? ((text["hidden_size"] as? Int) ?? 0) / attentionHeads : 0)
-        guard cached > 0, heads > 0, headDim > 0 else { return nil }
-        return 2 * cached * heads * headDim * 2
+        return product([2, cached, heads, headDim, 2])
     }
 
     static func family(_ config: [String: Any]) -> String? {
@@ -238,9 +250,9 @@ enum ModelScanner {
         return values.count == 3 ? values : nil
     }
 
-    /// A model's own drafter (in its folder, such as dflash2/) comes first. A drafter on its own is paired
-    /// only when it is the one loose drafter of that shape: models of one architecture share the shape, so
-    /// another model's bundled drafter is never borrowed.
+    /// A model's own drafter (in its folder, such as dflash2/) comes first, when its shape matches the model's
+    /// (or a shape is unknown). A drafter on its own is paired only when it is the one loose drafter of that
+    /// shape: models of one architecture share the shape, so another model's bundled drafter is never borrowed.
     static func pairDrafters(_ rows: inout [LocalModel]) {
         let drafterRows = rows.filter { $0.drafterSignature != nil }
         let modelPaths = rows.filter(\.loadable).map(\.path)
@@ -250,8 +262,8 @@ enum ModelScanner {
             loose[row.drafterSignature!, default: []].append(row.path)
         }
         for index in rows.indices where rows[index].loadable {
-            let path = rows[index].path
-            if let own = drafterRows.first(where: { inside($0.path, path) }) {
+            let path = rows[index].path, signature = rows[index].targetSignature
+            if let own = drafterRows.first(where: { inside($0.path, path) && (signature == nil || $0.drafterSignature == signature) }) {
                 rows[index].drafter = own.path
             } else if let sig = rows[index].targetSignature, let matches = loose[sig], matches.count == 1 {
                 rows[index].drafter = matches[0]

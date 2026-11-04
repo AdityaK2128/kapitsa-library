@@ -283,15 +283,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
             let server = ServerController.shared
+            if let work = AppStore.shared.unfinishedFileWork {
+                let alert = NSAlert()
+                alert.messageText = "Quit Before It Finishes?"
+                alert.informativeText = "\(work). Quitting now stops it partway and can leave an incomplete copy behind."
+                alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Quit Anyway")
+                guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+            }
+            if server.owned {
+                let alert = NSAlert()
+                alert.messageText = "Stop Running Model?"
+                alert.informativeText = "Quitting stops \(server.record?.modelName ?? "the model"). Connected agents and chats will disconnect."
+                alert.addButton(withTitle: "Stop and Quit")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+                server.stopAndWait()
+            }
             BenchmarkRunner.shared.cancel()
-            guard server.owned else { return .terminateNow }
-            let alert = NSAlert()
-            alert.messageText = "Stop Running Model?"
-            alert.informativeText = "Quitting stops \(server.record?.modelName ?? "the model"). Connected agents and chats will disconnect."
-            alert.addButton(withTitle: "Stop and Quit")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
-            server.stopAndWait()
+            Downloads.shared.pauseAllAndWait()
             return .terminateNow
         }
     }
