@@ -480,3 +480,75 @@ struct ImportSheet: View {
         }
     }
 }
+
+/// A short, collapsible explanation at the top of a page, for people new to it. Open the first time;
+/// collapsing it is remembered, and the header row stays so it can be opened again.
+struct HowItWorks<Footer: View>: View {
+    struct Step: Identifiable {
+        let symbol: String
+        let title: String
+        let text: String
+        var id: String { title }
+    }
+
+    let title: String
+    let steps: [Step]
+    @ViewBuilder var footer: Footer
+    @AppStorage private var collapsed: Bool
+
+    init(_ title: String, key: String, steps: [Step], @ViewBuilder footer: () -> Footer) {
+        self.title = title
+        self.steps = steps
+        self.footer = footer()
+        _collapsed = AppStorage(wrappedValue: false, "howItWorks.\(key).collapsed")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Button { withAnimation(.easeInOut(duration: 0.2)) { collapsed.toggle() } } label: {
+                HStack {
+                    Label(title, systemImage: "questionmark.circle").font(.headline)
+                    Spacer()
+                    Text(collapsed ? "Show" : "Hide").font(.callout).foregroundStyle(.secondary)
+                    Image(systemName: "chevron.down").rotationEffect(.degrees(collapsed ? -90 : 0)).foregroundStyle(.secondary)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if !collapsed {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 190), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
+                    ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Image(systemName: step.symbol).foregroundStyle(Color.accentColor)
+                                    .frame(width: 28, height: 28).background(Circle().fill(Color.accentColor.opacity(0.12)))
+                                Text("\(index + 1). \(step.title)").font(.callout.weight(.semibold))
+                            }
+                            Text(step.text).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                footer
+            }
+        }.card()
+    }
+}
+
+extension HowItWorks where Footer == EmptyView {
+    init(_ title: String, key: String, steps: [Step]) { self.init(title, key: key, steps: steps) { EmptyView() } }
+}
+
+/// A plain-language aside inside a guide: a small icon, a bold lead and its explanation.
+struct GuideNote: View {
+    let symbol: String
+    let lead: String
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 20)
+            (Text(lead + " ").fontWeight(.semibold) + Text(text).foregroundColor(.secondary))
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+    }
+}

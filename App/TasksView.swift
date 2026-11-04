@@ -16,6 +16,7 @@ struct TasksView: View {
 
     var body: some View {
         PageScaffold(title: "Tasks", subtitle: "Give an agent a job and let it work in the background on the local model. Review what it changed, then keep or discard it.") {
+            guide
             newTaskCard
             VStack(alignment: .leading, spacing: 14) {
                 SectionHeader(title: "Queue", detail: runner.tasks.isEmpty ? nil : queueDetail)
@@ -32,6 +33,77 @@ struct TasksView: View {
         }
         .sheet(item: $diffTask) { DiffSheet(task: $0, runner: runner) }
         .onAppear { if agent.isEmpty || !available.contains(where: { $0.id == agent }) { agent = available.first?.id ?? "" } }
+        .task(id: project) { await refreshProjectState() }
+    }
+
+    private var guide: some View {
+        HowItWorks("How Tasks Work", key: "tasks", steps: [
+            .init(symbol: "text.bubble", title: "Describe the job",
+                  text: "Pick a project folder and an agent, and write what you want done, the way you’d brief a colleague."),
+            .init(symbol: "moon.zzz", title: "It works on its own",
+                  text: "The agent runs in the background on your local model, with no terminal and no questions. Queue several; they run one after another."),
+            .init(symbol: "checkmark.seal", title: "Optionally, a check",
+                  text: "Give a command that proves the job is done, such as npm test. Nearloop runs it and sends the agent back until it passes."),
+            .init(symbol: "eye", title: "You decide",
+                  text: "Nothing is final until you say so. See every changed line, then keep the result or discard it to put things back."),
+        ]) {
+            GuideNote(symbol: "arrow.triangle.branch", lead: "Why Git?",
+                      text: "Git is the free tool developers use to keep snapshots of a project. Tasks take a snapshot before the agent starts, so Nearloop can show exactly what changed and undo it. It all stays on your Mac. GitHub, a website for sharing projects, isn’t involved and you don’t need an account.")
+            GuideNote(symbol: "bubble.left.and.text.bubble.right", lead: "Tasks or Coding Agents?",
+                      text: "Use Coding Agents to chat with an agent live in a terminal. Use Tasks to hand off a job, do something else, and review the result later.")
+        }
+    }
+
+    // MARK: Project readiness
+
+    @State private var projectState: Git.ProjectState?
+    @State private var settingUp = false
+
+    private func refreshProjectState() async {
+        guard !project.isEmpty else { projectState = nil; return }
+        let path = project
+        let state = await Task.detached { Git.state(of: path) }.value
+        if path == project { projectState = state }
+    }
+
+    /// What the chosen project still needs before it can take tasks, with the fix one click away.
+    @ViewBuilder private var projectReadiness: some View {
+        switch projectState {
+        case .noGit?:
+            HStack(alignment: .top, spacing: 10) {
+                Label("Tasks need Git, which comes with Apple’s free command line developer tools. Install them, then come back.",
+                      systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("Install Tools…") {
+                    try? Process.run(URL(fileURLWithPath: "/usr/bin/xcode-select"), arguments: ["--install"])
+                }.controlSize(.small)
+                Button("Check Again") { Task { await refreshProjectState() } }.controlSize(.small)
+            }
+        case .notRepository?, .noCommits?:
+            HStack(alignment: .top, spacing: 10) {
+                Text(projectState == .notRepository
+                     ? "This folder isn’t tracked with Git yet. Set Up Git takes a first snapshot of your files, so you can see and undo whatever an agent changes. It stays on your Mac; nothing is uploaded."
+                     : "This Git project has no snapshot (commit) yet. Set Up Git takes the first one, so tasks have a starting point to compare with.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                if settingUp { ProgressView().controlSize(.small) }
+                Button("Set Up Git") { setUpGit() }.controlSize(.small).disabled(settingUp)
+            }
+        default: EmptyView()
+        }
+    }
+
+    private func setUpGit() {
+        let path = project
+        settingUp = true
+        Task {
+            let error = await Task.detached { () -> String? in
+                do { try Git.setUp(path); return nil } catch { return error.localizedDescription }
+            }.value
+            settingUp = false
+            if let error { store.errorMessage = "Couldn’t set up Git: " + error } else { store.notice = "Git is set up. The first snapshot is taken." }
+            await refreshProjectState()
+        }
     }
 
     private var queueDetail: String {
@@ -45,7 +117,7 @@ struct TasksView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("New Task").font(.headline)
             if available.isEmpty {
-                Text("Tasks need OpenCode, Pi or Codex CLI, which can work without a terminal. Install one from Coding Agents. (Claude Code can’t run unattended on local models yet.)")
+                Text("Tasks need OpenCode, Pi or Codex CLI, agents that can work without a terminal. Install one from Coding Agents in the sidebar, then come back. (Claude Code can’t run unattended on local models yet.)")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else {
                 HStack(spacing: 10) {
@@ -57,6 +129,7 @@ struct TasksView: View {
                     Button("Choose…") { if let url = store.chooseProject() { project = url.path } }
                     Spacer(minLength: 0)
                 }
+                projectReadiness.padding(.leading, 74)
                 HStack(spacing: 10) {
                     Text("Agent").foregroundStyle(.secondary).frame(width: 64, alignment: .leading)
                     Picker("Agent", selection: $agent) {
@@ -81,7 +154,7 @@ struct TasksView: View {
                             Text("The project folder").tag(AgentTask.Workspace.folder)
                         }.pickerStyle(.segmented).labelsHidden().fixedSize()
                         Text(workspace == .copy
-                             ? "A git worktree of your last commit; your files stay untouched until you apply the result. Uncommitted changes and ignored folders (such as node_modules) aren’t in the copy."
+                             ? "The agent works on a copy of your project as of its last Git snapshot, so your own files stay untouched until you choose Apply. Changes you haven’t committed and ignored folders (such as node_modules) aren’t in the copy."
                              : "Works on your files directly, with their dependencies. Discard restores the files it changed and deletes the ones it created; avoid editing the project while it runs.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
@@ -94,7 +167,8 @@ struct TasksView: View {
                     Spacer(minLength: 12)
                     Button { add() } label: { Label("Add Task", systemImage: "plus") }
                         .buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || project.isEmpty || agent.isEmpty)
+                        .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || project.isEmpty || agent.isEmpty
+                                  || (projectState != nil && projectState != .ready))
                 }
             }
         }.card()

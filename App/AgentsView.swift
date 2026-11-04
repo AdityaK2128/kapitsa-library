@@ -8,6 +8,19 @@ struct AgentsView: View {
 
     var body: some View {
         PageScaffold(title: "Coding Agents", subtitle: "Set up and launch coding agents on the local model. If no model is running, the default model loads first.") {
+            HowItWorks("How Coding Agents Work", key: "agents", steps: [
+                .init(symbol: "sparkles", title: "What an agent is",
+                      text: "An AI assistant for code that runs in a terminal, inside a project folder. It reads your files, edits them and runs commands while you chat with it."),
+                .init(symbol: "arrow.down.circle", title: "Install one",
+                      text: "Agents are free apps made by others. Copy an install command below, paste it in Terminal, then click Refresh."),
+                .init(symbol: "folder", title: "Open a project",
+                      text: "Click Open Project and pick a folder. Nearloop loads the default model and opens a terminal with the agent already connected to it."),
+                .init(symbol: "lock.shield", title: "Private and free",
+                      text: "These agents normally talk to a paid cloud model. Here they use the model on your Mac: no account, no per-token cost, and your code stays local."),
+            ]) {
+                GuideNote(symbol: "bubble.left.and.text.bubble.right", lead: "Coding Agents or Tasks?",
+                          text: "Here you chat with an agent live and watch it work. In Tasks you hand off a job, let it run in the background, and review the result later.")
+            }
             modelCard
             if let launching = store.launching {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text(launching).foregroundStyle(.secondary) }

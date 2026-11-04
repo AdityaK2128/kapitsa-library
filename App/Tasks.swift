@@ -72,6 +72,37 @@ enum Git {
 
     static func lines(_ output: String) -> [String] { output.split(separator: "\n").map(String.init).filter { !$0.isEmpty } }
 
+    /// Whether a project folder can take tasks, and if not, what's missing.
+    enum ProjectState { case ready, noGit, notRepository, noCommits }
+
+    static func state(of project: String) -> ProjectState {
+        // /usr/bin/git is only a stub until Apple's command line developer tools are installed.
+        guard (try? Kapitsa.runSync("/usr/bin/xcode-select", ["-p"], timeout: 10))?.code == 0 else { return .noGit }
+        guard isRepository(project) else { return .notRepository }
+        return status(["rev-parse", "--verify", "-q", "HEAD"], in: project) == 0 ? .ready : .noCommits
+    }
+
+    /// Folders that hold downloads or build output; they would bloat the snapshot, so a new .gitignore leaves them out.
+    static let heavyFolders = ["node_modules", ".venv", "venv", "__pycache__", ".build", "build", "dist", "target", "DerivedData", ".next", "Pods"]
+
+    /// Starts tracking a folder: `git init` if needed, a .gitignore for heavy folders when it has none, and a first
+    /// commit of everything, so tasks have a starting point to compare with and return to. Nothing leaves the Mac.
+    static func setUp(_ project: String) throws {
+        if !isRepository(project) { try run(["init", "-q"], in: project) }
+        let ignore = URL(fileURLWithPath: project).appendingPathComponent(".gitignore")
+        if !FileManager.default.fileExists(atPath: ignore.path) {
+            let present = heavyFolders.filter { FileManager.default.fileExists(atPath: URL(fileURLWithPath: project).appendingPathComponent($0).path) }
+            try ((present.map { $0 + "/" } + [".DS_Store"]).joined(separator: "\n") + "\n").write(to: ignore, atomically: true, encoding: .utf8)
+        }
+        try run(["add", "-A"], in: project, timeout: 600)
+        let hasCommit = status(["rev-parse", "--verify", "-q", "HEAD"], in: project) == 0
+        guard !hasCommit || status(["diff", "--cached", "--quiet"], in: project) != 0 else { return }
+        // The user's own name and email when git has them; a neutral one otherwise, only for this commit.
+        let named = (try? run(["config", "user.email"], in: project)).map { !$0.isEmpty } ?? false
+        try run((named ? [] : ["-c", "user.name=Nearloop", "-c", "user.email=nearloop@localhost"]) +
+                ["commit", "--no-verify", "-q", "--allow-empty", "-m", "Starting point (set up by Nearloop)"], in: project, timeout: 600)
+    }
+
     /// Never prompt, never page, and identify the task commits Nearloop makes on its own branches.
     private static var environment: [String: String] {
         var env = Kapitsa.environment()
@@ -145,7 +176,7 @@ final class TaskRunner: ObservableObject {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         guard Git.isRepository(project) else {
-            throw Kapitsa.Failure(errorDescription: "\(URL(fileURLWithPath: project).lastPathComponent) isn’t a git repository. Tasks use git so you can review and undo what the agent changed; run “git init” and commit once first.")
+            throw Kapitsa.Failure(errorDescription: "\(URL(fileURLWithPath: project).lastPathComponent) isn’t tracked with Git yet. Use Set Up Git under the project, so you can review and undo what the agent changes.")
         }
         var task = AgentTask(id: UUID(), prompt: prompt, agent: agent, project: project, workspace: workspace)
         let check = check?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
