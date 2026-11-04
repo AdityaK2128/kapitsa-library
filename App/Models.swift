@@ -238,11 +238,22 @@ enum ModelScanner {
         return values.count == 3 ? values : nil
     }
 
+    /// A model's own drafter (in its folder, such as dflash2/) comes first. A drafter on its own is paired
+    /// only when it is the one loose drafter of that shape: models of one architecture share the shape, so
+    /// another model's bundled drafter is never borrowed.
     static func pairDrafters(_ rows: inout [LocalModel]) {
-        var drafters: [[Int]: [String]] = [:]
-        for row in rows { if let sig = row.drafterSignature { drafters[sig, default: []].append(row.path) } }
+        let drafterRows = rows.filter { $0.drafterSignature != nil }
+        let modelPaths = rows.filter(\.loadable).map(\.path)
+        func inside(_ path: String, _ folder: String) -> Bool { path.hasPrefix(folder + "/") }
+        var loose: [[Int]: [String]] = [:]
+        for row in drafterRows where !modelPaths.contains(where: { inside(row.path, $0) }) {
+            loose[row.drafterSignature!, default: []].append(row.path)
+        }
         for index in rows.indices where rows[index].loadable {
-            if let sig = rows[index].targetSignature, let matches = drafters[sig], matches.count == 1 {
+            let path = rows[index].path
+            if let own = drafterRows.first(where: { inside($0.path, path) }) {
+                rows[index].drafter = own.path
+            } else if let sig = rows[index].targetSignature, let matches = loose[sig], matches.count == 1 {
                 rows[index].drafter = matches[0]
             }
         }

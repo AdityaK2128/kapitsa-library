@@ -188,11 +188,19 @@ final class Downloads: ObservableObject {
     var finished: (String) -> Void = { _ in }
     private var processes: [String: Process] = [:]
 
+    /// A drafter to fetch after a model, from its own repository, moved into the model's folder (such as
+    /// dflash2/) where Kapitsa finds it, the same layout as Kapitsa's catalog downloads.
+    struct Companion: Equatable { let repo: String; let into: String }
+    private var companions: [String: Companion] = [:]
+    /// Set while the companion, not the model, is downloading.
+    private var fetchingCompanion: Set<String> = []
+
     var active: [Job] { jobs.values.filter(\.busy).sorted { $0.title < $1.title } }
 
     /// Starts or resumes a download. Ignored while one for the same model is preparing, running or pausing.
-    func start(_ spec: String, title: String, expectedBytes: Int64) {
+    func start(_ spec: String, title: String, expectedBytes: Int64, companion: Companion? = nil) {
         guard processes[spec] == nil, jobs[spec]?.busy != true else { return }
+        if let companion { companions[spec] = companion }
         if var job = jobs[spec] {
             // Resuming: keep the progress already on disk instead of dropping back to zero.
             job.state = .preparing
@@ -210,7 +218,7 @@ final class Downloads: ObservableObject {
                     return
                 }
                 if let dir = json["dir"] as? String { jobs[spec]?.folder = URL(fileURLWithPath: dir) }
-                if json["downloaded"] as? Bool == true { complete(spec); return }
+                if json["downloaded"] as? Bool == true { modelDone(spec); return }
                 // Paused while preparing: don't start the transfer.
                 guard jobs[spec]?.state == .preparing else { jobs[spec]?.state = .paused; return }
                 try run(spec)
@@ -220,11 +228,11 @@ final class Downloads: ObservableObject {
         }
     }
 
-    private func run(_ spec: String) throws {
+    private func run(_ spec: String, pulling repo: String? = nil, also measured: URL? = nil) throws {
         guard let binary = Kapitsa.binary else { throw Kapitsa.Failure(errorDescription: "Kapitsa engine not found. Reinstall Nearloop.") }
         let process = Process()
         process.executableURL = binary
-        process.arguments = ["pull", spec]
+        process.arguments = ["pull", repo ?? spec]
         process.environment = Kapitsa.environment()
         process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
@@ -243,7 +251,8 @@ final class Downloads: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.processes[spec] = nil
-                if finished.terminationStatus == 0 { self.complete(spec) }
+                let companion = self.fetchingCompanion.remove(spec) != nil
+                if finished.terminationStatus == 0 { companion ? self.companionDone(spec) : self.modelDone(spec) }
                 else if self.jobs[spec]?.state == .pausing || finished.terminationReason == .uncaughtSignal || finished.terminationStatus == 130 { self.jobs[spec]?.state = .paused }
                 else { self.jobs[spec]?.state = .failed(self.jobs[spec]?.lastLine ?? "Download failed (code \(finished.terminationStatus)).") }
             }
@@ -254,10 +263,54 @@ final class Downloads: ObservableObject {
         Task { [weak self] in
             while let self, self.processes[spec] != nil {
                 if let folder = self.jobs[spec]?.folder {
-                    let size = await Task.detached { SystemMemory.allocatedBytes(folder) }.value
+                    let size = await Task.detached { SystemMemory.allocatedBytes(folder) + (measured.map(SystemMemory.allocatedBytes) ?? 0) }.value
                     self.jobs[spec]?.done = size
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    /// The model is in place: fetch its companion if it has one that isn't there yet, else finish.
+    private func modelDone(_ spec: String) {
+        guard let companion = companions[spec], let folder = jobs[spec]?.folder,
+              !FileManager.default.fileExists(atPath: folder.appendingPathComponent(companion.into).appendingPathComponent("config.json").path) else {
+            complete(spec); return
+        }
+        jobs[spec]?.state = .preparing
+        jobs[spec]?.lastLine = "Downloading the drafter…"
+        Task {
+            do {
+                let plan = try await Kapitsa.run(["pull", companion.repo, "--dry-run", "--json"], timeout: 60)
+                let json = plan.output.split(separator: "\n").last { $0.hasPrefix("{") }.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+                guard plan.code == 0, let dir = json?["dir"] as? String else {
+                    jobs[spec]?.state = .failed("The drafter couldn’t be found: \(companion.repo).")
+                    return
+                }
+                guard jobs[spec]?.state == .preparing else { jobs[spec]?.state = .paused; return }
+                if json?["downloaded"] as? Bool == true { companionDone(spec); return }
+                fetchingCompanion.insert(spec)
+                try run(spec, pulling: companion.repo, also: URL(fileURLWithPath: dir))
+            } catch {
+                jobs[spec]?.state = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    /// Moves the downloaded companion into the model's folder, replacing any earlier copy.
+    private func companionDone(_ spec: String) {
+        guard let companion = companions[spec], let folder = jobs[spec]?.folder else { complete(spec); return }
+        Task {
+            let plan = try? await Kapitsa.run(["pull", companion.repo, "--dry-run", "--json"], timeout: 60)
+            let json = plan?.output.split(separator: "\n").last { $0.hasPrefix("{") }.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            let target = folder.appendingPathComponent(companion.into)
+            do {
+                guard let dir = json?["dir"] as? String else { throw Kapitsa.Failure(errorDescription: "The drafter download wasn’t found.") }
+                try? FileManager.default.removeItem(at: target)
+                try FileManager.default.moveItem(at: URL(fileURLWithPath: dir), to: target)
+                complete(spec)
+            } catch {
+                jobs[spec]?.state = .failed("The drafter couldn’t be put in place: \(error.localizedDescription)")
             }
         }
     }

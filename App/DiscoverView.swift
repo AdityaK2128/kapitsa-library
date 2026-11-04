@@ -32,6 +32,7 @@ private struct CatalogSection: View {
                 RecommendedCard(family: family, variant: pick)
             }
             if !store.catalog.isEmpty {
+                CodingPicksSection()
                 VStack(alignment: .leading, spacing: 14) {
                     SectionHeader(title: "All Models", detail: "\(store.catalog.count) model families · sizes shown on disk")
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 400), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
