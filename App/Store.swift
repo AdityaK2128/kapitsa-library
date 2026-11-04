@@ -107,6 +107,7 @@ final class AppStore: ObservableObject {
     func bootstrap() async {
         guard !booted else { return }
         booted = true
+        Updater.shared.startAutomaticChecks()
         await scan()
         await loadCatalog()
         if Prefs.autoStart, !server.running, let path = Prefs.lastModel, let model = model(at: path) {

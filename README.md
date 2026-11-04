@@ -16,6 +16,7 @@ A Mac app for running language models locally and using them with coding agents:
 - **Measure** writing and reading speed, time to first token, tool-call support and peak memory with Kapitsa's own benchmark. The benchmark stops itself if memory pressure turns critical.
 - **Use your existing models.** Add any folders, on any drive; MLX folders and GGUF files are detected from their config and file header. GGUFs can be converted for Kapitsa. Move a model to another folder or drive, or to the Trash, from Library.
 - **Stays out of the way.** A menu bar icon keeps the server one click away after you close the window. Optionally open at login and load your last model automatically.
+- **Updates itself.** Nearloop checks GitHub Releases once a day (or when you choose Check for Updates), and installs a new version in place after verifying it is signed by the same developer.
 
 ## Screenshots
 
@@ -75,7 +76,7 @@ Other apps can use the running model too. The base URL is `http://127.0.0.1:8000
 
 ## Privacy
 
-Everything runs on your Mac. The app contacts the network only to download models you choose (from Hugging Face, through Kapitsa) and to search Hugging Face when you use that tab. It has no accounts and no telemetry. The server listens only on this Mac unless you turn on network visibility.
+Everything runs on your Mac. The app contacts the network only to download models you choose (from Hugging Face, through Kapitsa) and to search Hugging Face when you use that tab. Once a day it asks GitHub for the latest release, unless you turn that off in Settings › General; the request carries only the app's version. It has no accounts and no telemetry. The server listens only on this Mac unless you turn on network visibility.
 
 ## Building
 

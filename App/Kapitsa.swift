@@ -63,6 +63,8 @@ enum Prefs {
     static var memoryMargin: Double { let v = defaults.double(forKey: "memoryMargin"); return v > 0 ? v : 2 }
     static var apiKey: String { defaults.string(forKey: "apiKey") ?? "" }
     static var autoStart: Bool { defaults.bool(forKey: "autoStartLastModel") }
+    /// On unless turned off in Settings › General.
+    static var checkForUpdates: Bool { defaults.object(forKey: "checkForUpdates") as? Bool ?? true }
     static var lastModel: String? {
         get { defaults.string(forKey: "lastModelPath") }
         set { defaults.set(newValue, forKey: "lastModelPath") }

@@ -6,6 +6,7 @@ struct MainWindow: View {
     @ObservedObject var store = AppStore.shared
     @ObservedObject var server = ServerController.shared
     @ObservedObject var downloads = Downloads.shared
+    @ObservedObject var updater = Updater.shared
 
     var body: some View {
         NavigationSplitView {
@@ -63,6 +64,7 @@ struct MainWindow: View {
                   secondaryButton: .cancel())
         }
         .sheet(isPresented: $store.showLog) { LogSheet() }
+        .sheet(isPresented: $updater.showSheet) { UpdateSheet() }
     }
 
     /// The tag must be the outermost modifier: a list matches rows to its selection by it, and a modifier
@@ -73,6 +75,7 @@ struct MainWindow: View {
 
     private var sidebarFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
+            UpdateBanner()
             if !downloads.active.isEmpty {
                 ForEach(downloads.active) { job in
                     VStack(alignment: .leading, spacing: 3) {
@@ -137,6 +140,7 @@ struct MenuBarContent: View {
         }
         Divider()
         Button("Open Nearloop") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        CheckForUpdatesButton()
         SettingsLink { Text("Settings…") }
         Divider()
         Button("Quit Nearloop") { NSApp.terminate(nil) }.keyboardShortcut("q")
@@ -204,6 +208,7 @@ struct SettingsView: View {
                 }
                 Text("The server keeps running when the window is closed and remains available from the menu bar.")
                     .font(.caption).foregroundStyle(.secondary)
+                UpdateSettings()
             }.formStyle(.grouped).tabItem { Label("General", systemImage: "gearshape") }
 
             Form {
@@ -212,7 +217,7 @@ struct SettingsView: View {
                     Text("Automatic (up to 4)").tag(0)
                     ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
                 }
-                Text("Requests beyond this wait their turn. Each one in flight keeps its own conversation in memory, so more of them means less context each. Choose 2 or more to let a background task and an agent work at the same time.")
+                Text("Requests beyond this wait their turn. Each one in flight keeps its own conversation in memory, so more of them means less context each. Choose 2 or more to let two agents or apps work at the same time.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Picker("Prompt Cache (SSD)", selection: $diskCache) {
                     Text("Automatic").tag("auto"); Text("2 GB").tag("2G"); Text("8 GB").tag("8G"); Text("16 GB").tag("16G"); Text("Off").tag("0")
@@ -306,6 +311,7 @@ struct NearloopApp: App {
         .defaultSize(width: 1180, height: 800)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
             CommandGroup(after: .newItem) {
                 Button("Add Model Folder…") { AppStore.shared.addLibrary() }.keyboardShortcut("o")
             }

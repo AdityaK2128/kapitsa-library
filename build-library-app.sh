@@ -44,6 +44,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$build</string>
+<key>NearloopUpdateRepository</key><string>${UPDATE_REPOSITORY:-AdityaK2128/nearloop}</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
