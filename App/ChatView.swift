@@ -218,14 +218,14 @@ private struct ChatThread: View {
                             UserBubble(message: message)
                         } else {
                             AssistantReply(message: message, live: writing && message.id == shown.last?.id,
-                                           isLast: !writing && message.id == lastAssistant, chat: chat)
+                                           isLast: !writing && message.id == lastAssistant, chat: chat, conversationID: conversation.id)
                         }
                     }
                     // A question left without an answer, say because the model stopped or the app quit while it wrote.
                     if !writing, shown.last?.role == .user {
                         HStack(spacing: 10) {
                             Label("No reply.", systemImage: "exclamationmark.bubble").foregroundStyle(.secondary)
-                            Button("Retry") { chat.regenerate() }.disabled(chat.busy)
+                            Button("Retry") { chat.regenerate(in: conversation.id) }.disabled(chat.busy)
                         }.font(.callout)
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -269,7 +269,7 @@ private struct ChatThread: View {
     }
 }
 
-private struct UserBubble: View {
+struct UserBubble: View {
     let message: ChatMessage
 
     var body: some View {
@@ -295,11 +295,12 @@ private struct UserBubble: View {
     }
 }
 
-private struct AssistantReply: View {
+struct AssistantReply: View {
     let message: ChatMessage
     let live: Bool
     let isLast: Bool
     @ObservedObject var chat: ChatStore
+    var conversationID: UUID?
     @State private var showThinking = false
 
     var body: some View {
@@ -344,7 +345,7 @@ private struct AssistantReply: View {
                 Button { copy(message.text) } label: { Image(systemName: "doc.on.doc") }.help("Copy")
             }
             if isLast {
-                Button { chat.regenerate() } label: { Image(systemName: "arrow.clockwise") }.help("Write the reply again").disabled(chat.busy)
+                Button { chat.regenerate(in: conversationID) } label: { Image(systemName: "arrow.clockwise") }.help("Write the reply again").disabled(chat.busy)
             }
             if let tokens = message.outputTokens {
                 Text("\(tokens.formatted()) tokens" + (message.tokensPerSecond.map { String(format: " · %.0f tok/s", $0) } ?? ""))

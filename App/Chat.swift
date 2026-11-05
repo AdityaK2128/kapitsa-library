@@ -57,6 +57,8 @@ final class ChatStore: ObservableObject {
     @Published var selectedID: UUID?
     /// The conversation a reply is being written in.
     @Published private(set) var generating: UUID?
+    /// The conversation the Quick Chat window shows; it stays in the history like any other.
+    @Published var quickID: UUID?
     @Published var webSearch: Bool { didSet { Prefs.defaults.set(webSearch, forKey: "chatWebSearch") } }
     @Published var thinking: Bool { didSet { Prefs.defaults.set(thinking, forKey: "chatThinking") } }
 
@@ -112,33 +114,44 @@ final class ChatStore: ObservableObject {
 
     // MARK: Sending
 
+    /// From the Chat page: into the open conversation, or a new one that becomes the open one.
     func send(_ text: String, images: [Data]) {
+        if let id = post(text, images: images, into: selectedID, quick: false) { selectedID = id }
+    }
+
+    /// From the Quick Chat window: into its conversation while that is recent, else a new one.
+    func sendQuick(_ text: String, images: [Data] = []) {
+        let recent = quickID.flatMap { id in conversations.first { $0.id == id } }.map { Date().timeIntervalSince($0.updated) < 15 * 60 } ?? false
+        if let id = post(text, images: images, into: recent ? quickID : nil, quick: true) { quickID = id }
+    }
+
+    private func post(_ text: String, images: [Data], into target: UUID?, quick: Bool) -> UUID? {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !busy, !text.isEmpty || !images.isEmpty else { return }
+        guard !busy, !text.isEmpty || !images.isEmpty else { return nil }
         let id: UUID
-        if let current = selectedID, index(of: current) != nil {
-            id = current
+        if let target, index(of: target) != nil {
+            id = target
         } else {
             var conversation = Conversation()
             conversation.title = Self.title(for: text.isEmpty ? "Image" : text)
             conversations.insert(conversation, at: 0)
             id = conversation.id
-            selectedID = id
         }
-        guard let index = index(of: id) else { return }
+        guard let index = index(of: id) else { return nil }
         conversations[index].messages.append(ChatMessage(role: .user, text: text, images: images))
         conversations[index].updated = Date()
         moveToTop(id)
         save(id)
-        reply(in: id)
+        reply(in: id, quick: quick)
+        return id
     }
 
     /// Writes the last reply again: everything after the last message the user sent goes.
-    func regenerate() {
-        guard !busy, let id = selectedID, let index = index(of: id),
+    func regenerate(in id: UUID? = nil) {
+        guard !busy, let id = id ?? selectedID, let index = index(of: id),
               let last = conversations[index].messages.lastIndex(where: { $0.role == .user }) else { return }
         conversations[index].messages.removeSubrange((last + 1)...)
-        reply(in: id)
+        reply(in: id, quick: id == quickID)
     }
 
     func stop() {
@@ -155,13 +168,15 @@ final class ChatStore: ObservableObject {
         return line.count > 48 ? String(line.prefix(47)).trimmingCharacters(in: .whitespaces) + "…" : line
     }
 
-    private func reply(in id: UUID) {
+    /// A Quick Chat uses the loaded model, else loads the one chosen for it in Settings › Quick Chat.
+    private func reply(in id: UUID, quick: Bool) {
         generating = id
         task = Task { [weak self] in
             guard let self else { return }
             defer { self.generating = nil; self.save(id) }
             do {
-                try await AppStore.shared.ensureServer(purpose: "Chat", context: Self.context)
+                try await AppStore.shared.ensureServer(purpose: quick ? "Quick Chat" : "Chat", context: Self.context,
+                                                       model: quick ? AppStore.shared.quickChatModel : nil)
             } catch {
                 self.append(ChatMessage(role: .assistant, error: error.localizedDescription), to: id)
                 return

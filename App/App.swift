@@ -26,6 +26,7 @@ struct MainWindow: View {
                     switch store.page {
                     case .home: HomeView()
                     case .chat: ChatView()
+                    case .settings: SettingsPage()
                     case .discover: DiscoverView()
                     case .models: ModelsView()
                     case .agents: AgentsView()
@@ -142,7 +143,7 @@ struct MenuBarContent: View {
         Button("Open Chat") { store.page = .chat; openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         Button("Open Nearloop") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         CheckForUpdatesButton()
-        SettingsLink { Text("Settings…") }
+        OpenSettingsButton()
         Divider()
         Button("Quit Nearloop") { NSApp.terminate(nil) }.keyboardShortcut("q")
     }
@@ -177,108 +178,14 @@ enum MenuBarIcon {
     }
 }
 
-// MARK: - Settings
-
-struct SettingsView: View {
-    @AppStorage("port") private var port = 8000
-    @AppStorage("slots") private var slots = 1
-    @AppStorage("diskCache") private var diskCache = "auto"
-    @AppStorage("shareOnNetwork") private var share = false
-    @AppStorage("apiKey") private var apiKey = ""
-    @AppStorage("terminalApp") private var terminal = "terminal"
-    @AppStorage("runtimeFolder") private var runtime = ""
-    @AppStorage("protectMemory") private var protect = true
-    @AppStorage("memoryMargin") private var margin = 2.0
-    @AppStorage("autoStartLastModel") private var autoStart = false
-    @State private var loginItem = SMAppService.mainApp.status == .enabled
-    @State private var version = "…"
-
-    var body: some View {
-        TabView {
-            Form {
-                Toggle("Open at Login", isOn: Binding(get: { loginItem }, set: { on in
-                    do {
-                        if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                    } catch { AppStore.shared.errorMessage = error.localizedDescription }
-                    loginItem = SMAppService.mainApp.status == .enabled
-                }))
-                Toggle("Load Last Model at Launch", isOn: $autoStart)
-                Picker("Terminal Application", selection: $terminal) {
-                    Text("Terminal").tag("terminal")
-                    Text(Agents.ghostty == nil ? "Ghostty (Not Installed)" : "Ghostty").tag("ghostty")
-                }
-                Text("The server keeps running when the window is closed and remains available from the menu bar.")
-                    .font(.caption).foregroundStyle(.secondary)
-                UpdateSettings()
-            }.formStyle(.grouped).tabItem { Label("General", systemImage: "gearshape") }
-
-            Form {
-                TextField("Port", value: $port, format: .number.grouping(.never))
-                Picker("Concurrent Requests", selection: $slots) {
-                    Text("Automatic (up to 4)").tag(0)
-                    ForEach(1...4, id: \.self) { Text("\($0)").tag($0) }
-                }
-                Text("Requests beyond this wait their turn. Each one in flight keeps its own conversation in memory, so more of them means less context each. Choose 2 or more to let two agents or apps work at the same time.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Picker("Prompt Cache (SSD)", selection: $diskCache) {
-                    Text("Automatic").tag("auto"); Text("2 GB").tag("2G"); Text("8 GB").tag("8G"); Text("16 GB").tag("16G"); Text("Off").tag("0")
-                }
-                Toggle("Allow Network Access", isOn: $share)
-                SecureField("API Key", text: $apiKey, prompt: Text("Optional"))
-                Text(share && apiKey.isEmpty ? "The server is reachable on your local network without authentication. Set an API key to require one."
-                     : "Agents launched from this app use the key automatically. Changes take effect on next model load.")
-                    .font(.caption).foregroundStyle(share && apiKey.isEmpty ? .orange : .secondary)
-            }.formStyle(.grouped).tabItem { Label("Server", systemImage: "server.rack") }
-
-            Form {
-                Toggle("Memory Protection", isOn: $protect)
-                Slider(value: $margin, in: 1...8, step: 0.5) { Text("Reserved for Other Apps: \(margin, specifier: "%.1f") GB") }.disabled(!protect)
-                Text("Sizes Kapitsa’s memory budget around what your other apps are using, keeping this reserve free, so a model never drives macOS into heavy swapping. Models that don’t fit are declined with an explanation.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                LabeledContent("System Memory", value: String(format: "%.0f GB total · %.0f GB available", SystemMemory.totalGB, SystemMemory.availableGB()))
-            }.formStyle(.grouped).tabItem { Label("Memory", systemImage: "memorychip") }
-
-            ChatSettings().tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
-
-            Form {
-                LabeledContent("Data Location") {
-                    HStack {
-                        Text(runtime.isEmpty ? "~/.cache/kapitsa (default)" : runtime).lineLimit(1).truncationMode(.middle)
-                        Button("Choose…") {
-                            let panel = NSOpenPanel()
-                            panel.canChooseDirectories = true
-                            panel.canChooseFiles = false
-                            panel.canCreateDirectories = true
-                            if panel.runModal() == .OK, let url = panel.url { runtime = url.path; Task { await AppStore.shared.scan() } }
-                        }
-                        if !runtime.isEmpty { Button("Reset") { runtime = ""; Task { await AppStore.shared.scan() } } }
-                    }
-                }
-                Text("Stores downloads, converted models, prompt caches and temporary files. An external drive saves internal storage.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.formStyle(.grouped).tabItem { Label("Storage", systemImage: "externaldrive") }
-
-            Form {
-                LabeledContent("Engine Version", value: version)
-                LabeledContent("Engine Path", value: Kapitsa.binary?.path ?? "Not Found")
-                Text("Powered by Kapitsa, the open-source inference engine for Apple silicon by Nace AI, licensed under the Apache License 2.0. License and notices are included in the app bundle. This app is independent of the Kapitsa project.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 16) {
-                    Link("Kapitsa on GitHub", destination: URL(string: "https://github.com/nace-ai/kapitsa")!)
-                    Link("Published Benchmarks", destination: URL(string: "https://github.com/nace-ai/kapitsa#benchmarks")!)
-                }.font(.callout)
-            }.formStyle(.grouped).tabItem { Label("About", systemImage: "info.circle") }
-        }
-        .frame(width: 560, height: 420)
-        .task { version = await Task.detached { Kapitsa.version() }.value }
-    }
-}
-
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Task { @MainActor in await AppStore.shared.bootstrap() }
+        Task { @MainActor in
+            QuickChatHotKey.shared.register()
+            await AppStore.shared.bootstrap()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -325,6 +232,8 @@ struct NearloopApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(after: .appInfo) { CheckForUpdatesButton() }
+            // Settings is a page of the main window, so ⌘, opens it there.
+            CommandGroup(replacing: .appSettings) { OpenSettingsButton() }
             CommandGroup(after: .newItem) {
                 Button("Add Model Folder…") { AppStore.shared.addLibrary() }.keyboardShortcut("o")
             }
@@ -340,6 +249,5 @@ struct NearloopApp: App {
         } label: {
             Image(nsImage: MenuBarIcon.image(active: server.phase == .ready))
         }
-        Settings { SettingsView() }
     }
 }

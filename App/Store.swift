@@ -3,7 +3,7 @@ import SwiftUI
 
 enum Page: String, CaseIterable, Identifiable {
     // Sidebar order: what's happening now and what happened, then the models, then the agents that use them.
-    case home, chat, usage, models, discover, benchmarks, agents
+    case home, chat, usage, models, discover, benchmarks, agents, settings
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -14,6 +14,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .discover: return "Discover"
         case .benchmarks: return "Benchmarks"
         case .agents: return "Coding Agents"
+        case .settings: return "Settings"
         }
     }
     var symbol: String {
@@ -25,6 +26,7 @@ enum Page: String, CaseIterable, Identifiable {
         case .discover: return "sparkle.magnifyingglass"
         case .benchmarks: return "gauge.with.dots.needle.67percent"
         case .agents: return "terminal"
+        case .settings: return "gearshape"
         }
     }
     /// The sidebar group; nil for the overview pages at the top.
@@ -33,9 +35,10 @@ enum Page: String, CaseIterable, Identifiable {
         case .home, .chat, .usage: return nil
         case .models, .discover, .benchmarks: return "Models"
         case .agents: return "Agents"
+        case .settings: return "App"
         }
     }
-    static let sections = ["Models", "Agents"]
+    static let sections = ["Models", "Agents", "App"]
 }
 
 /// App-wide state shared by the main window and the menu bar.
@@ -351,6 +354,12 @@ final class AppStore: ObservableObject {
         return (capable.isEmpty ? fitting : capable).max { $0.size < $1.size }
     }
 
+    /// The model Quick Chat loads when none is running: the one chosen in Settings › Quick Chat, else the default.
+    var quickChatModel: LocalModel? {
+        if let path = Prefs.defaults.string(forKey: "quickChatModel"), let model = model(at: path), model.loadable { return model }
+        return agentModel
+    }
+
     func chooseProject() -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -391,11 +400,11 @@ final class AppStore: ObservableObject {
         try await ensureServer(purpose: Agents.displayName(agent)) { [weak self] model in self?.agentContext(agent, model) ?? model.largestPreset }
     }
 
-    /// Loads the default model (`agentModel`) for whatever needs one, a chat or an agent, unless one is
-    /// serving already, and waits until it answers.
-    func ensureServer(purpose: String, context: (LocalModel) -> String) async throws {
+    /// Loads a model for whatever needs one, a chat or an agent, unless one is serving already (that one is
+    /// used as it is), and waits until it answers. Without a model given, the default model (`agentModel`).
+    func ensureServer(purpose: String, context: (LocalModel) -> String, model chosen: LocalModel? = nil) async throws {
         if server.phase == .ready || server.phase == .external { return }
-        guard let model = agentModel else {
+        guard let model = chosen ?? agentModel else {
             throw Kapitsa.Failure(errorDescription: "No model available. Download one from Discover or add a model folder.")
         }
         // Registered before the start, so a start that throws still clears the launch state.
