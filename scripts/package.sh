@@ -16,7 +16,7 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 app="$project_dir/Nearloop.app"
 dist="$project_dir/dist"
-export APP_VERSION=${APP_VERSION:-3.6}
+export APP_VERSION=${APP_VERSION:-3.6.1}
 identity=${SIGN_IDENTITY:-}
 profile=${NOTARY_PROFILE:-}
 
