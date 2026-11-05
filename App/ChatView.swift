@@ -475,30 +475,33 @@ struct FlowLayout: Layout {
     }
 }
 
-/// A picture from the web, loaded only from public addresses; clicking it opens its page.
+/// A picture from the web, fetched only from public addresses (the name is resolved and every redirect
+/// checked, like a page read); clicking it opens its page.
 struct RemoteImage: View {
     let address: String
     var link: String?
     var help = ""
     var fit = false
+    @State private var image: NSImage?
+    @State private var failed = false
 
     var body: some View {
-        if WebSearch.loadable(address), let url = URL(string: address) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    if fit { image.resizable().scaledToFit() } else { image.resizable().scaledToFill() }
-                case .failure:
-                    placeholder(Image(systemName: "photo.badge.exclamationmark"))
-                default:
-                    placeholder(ProgressView().controlSize(.small))
-                }
+        Group {
+            if let image {
+                if fit { Image(nsImage: image).resizable().scaledToFit() } else { Image(nsImage: image).resizable().scaledToFill() }
+            } else if failed {
+                placeholder(Image(systemName: "photo.badge.exclamationmark"))
+            } else {
+                placeholder(ProgressView().controlSize(.small))
             }
-            .contentShape(Rectangle())
-            .onTapGesture { if let link, let page = URL(string: link) { NSWorkspace.shared.open(page) } }
-            .help(help)
-        } else {
-            placeholder(Image(systemName: "photo"))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { if let link, let page = URL(string: link) { NSWorkspace.shared.open(page) } }
+        .help(help)
+        .task(id: address) {
+            image = nil
+            failed = false
+            if let data = await WebSearch.imageData(address), let loaded = NSImage(data: data) { image = loaded } else { failed = true }
         }
     }
 

@@ -132,11 +132,23 @@ final class ChatStore: ObservableObject {
         // The earlier on/off switch carries over: off stays off, on becomes Auto.
         thinking = ThinkingLevel(rawValue: Prefs.defaults.string(forKey: "chatThinkingLevel") ?? "")
             ?? ((Prefs.defaults.object(forKey: "chatThinking") as? Bool) == false ? .off : .auto)
-        let files = (try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: nil)) ?? []
-        let decoder = JSONDecoder()
-        conversations = files.filter { $0.pathExtension == "json" }
-            .compactMap { try? decoder.decode(Conversation.self, from: Data(contentsOf: $0)) }
-            .sorted { $0.updated > $1.updated }
+        // Chats (with their images) are read off the main thread, so opening Chat or Quick Chat doesn't stall.
+        let folder = Self.folder
+        Task {
+            let loaded = await Task.detached { () -> [Conversation] in
+                let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+                let decoder = JSONDecoder()
+                return files.filter { $0.pathExtension == "json" }.compactMap { try? decoder.decode(Conversation.self, from: Data(contentsOf: $0)) }
+            }.value
+            // Anything started before the files were read is kept.
+            let current = Set(conversations.map(\.id))
+            conversations = (conversations + loaded.filter { !current.contains($0.id) }).sorted { $0.updated > $1.updated }
+        }
+    }
+
+    /// When the app quits mid-reply: keep what was written.
+    func saveInProgress() {
+        if let generating { save(generating) }
     }
 
     var selected: Conversation? { conversations.first { $0.id == selectedID } }
@@ -238,6 +250,11 @@ final class ChatStore: ObservableObject {
             do {
                 try await AppStore.shared.ensureServer(purpose: quick ? "Quick Chat" : "Chat", context: Self.context,
                                                        model: quick ? AppStore.shared.quickChatModel : nil)
+                try Task.checkCancellation()
+            } catch is CancellationError {
+                // Stopped while the model loaded; the model keeps loading for next time.
+                self.append(ChatMessage(role: .assistant, error: "Stopped."), to: id)
+                return
             } catch {
                 self.append(ChatMessage(role: .assistant, error: error.localizedDescription), to: id)
                 return
@@ -329,6 +346,7 @@ final class ChatStore: ObservableObject {
         var result = ChatMessage(role: .tool, text: payload)
         result.toolCallID = call.id
         append(result, to: id)
+        save(id)
     }
 
     private func step(_ id: UUID, _ messageID: UUID, _ callID: String, _ change: (inout ChatStep) -> Void) {
@@ -360,6 +378,9 @@ final class ChatStore: ObservableObject {
     }
 
     private func requestMessages(_ conversation: Conversation, tools: Bool, thinks: Bool) -> [[String: Any]] {
+        // A reply stopped between two tool calls has calls without results; the API needs each call answered,
+        // so only the answered ones are sent.
+        let answered = Set(conversation.messages.compactMap { $0.role == .tool ? $0.toolCallID : nil })
         var system = systemPrompt(tools: tools)
         if thinks, let guidance = thinking.guidance { system += "\n\n" + guidance }
         var messages: [[String: Any]] = [["role": "system", "content": system]]
@@ -376,10 +397,11 @@ final class ChatStore: ObservableObject {
                     messages.append(["role": "user", "content": parts])
                 }
             case .assistant:
-                guard !message.text.isEmpty || !message.toolCalls.isEmpty else { continue }
+                let calls = message.toolCalls.filter { answered.contains($0.id) }
+                guard !message.text.isEmpty || !calls.isEmpty else { continue }
                 var entry: [String: Any] = ["role": "assistant", "content": message.text]
-                if !message.toolCalls.isEmpty {
-                    entry["tool_calls"] = message.toolCalls.map {
+                if !calls.isEmpty {
+                    entry["tool_calls"] = calls.map {
                         ["id": $0.id, "type": "function", "function": ["name": $0.name, "arguments": $0.arguments]]
                     }
                 }
@@ -426,12 +448,14 @@ final class ChatStore: ObservableObject {
         var firstText: Date?, firstToken: Date?
         var text = "", reasoning = "", outputTokens: Int?
         var calls: [Int: ChatToolCall] = [:]
-        var lastPush = Date.distantPast
+        var lastPush = Date.distantPast, lastSave = Date()
         func push(final: Bool) {
             guard final || Date().timeIntervalSince(lastPush) > 0.06 else { return }
             lastPush = Date()
             let (t, r) = (text, reasoning)
             update(id, messageID) { $0.text = t; $0.reasoning = r }
+            // Every few seconds to disk, so a reply cut off by quitting or a crash keeps what was written.
+            if Date().timeIntervalSince(lastSave) > 3 { lastSave = Date(); save(id) }
         }
         for try await line in bytes.lines {
             try Task.checkCancellation()

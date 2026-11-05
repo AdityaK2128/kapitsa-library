@@ -212,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             BenchmarkRunner.shared.cancel()
             Downloads.shared.pauseAllAndWait()
+            ChatStore.shared.saveInProgress()
             return .terminateNow
         }
     }

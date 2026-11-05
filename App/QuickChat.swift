@@ -190,6 +190,24 @@ final class QuickChatWindow: NSObject, NSWindowDelegate {
         }
         panel.makeKeyAndOrderFront(nil)
         NotificationCenter.default.post(name: .quickChatShown, object: nil)
+        // Typing must go straight into the box. SwiftUI's focus request can arrive before the panel is the key
+        // window (Nearloop isn't the active app), so once it is, the text field is made first responder directly.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak panel] in
+            guard let panel, panel.isVisible else { return }
+            panel.makeKey()
+            if let field = Self.textField(in: panel.contentView) {
+                if panel.firstResponder !== field.currentEditor() { panel.makeFirstResponder(field) }
+                // Like Spotlight: an earlier draft is selected, so typing replaces it.
+                field.currentEditor()?.selectAll(nil)
+            }
+        }
+    }
+
+    private static func textField(in view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for subview in view.subviews { if let field = textField(in: subview) { return field } }
+        return nil
     }
 
     func hide() {
@@ -267,7 +285,7 @@ struct QuickChatView: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: chat.webSearch ? "sparkle.magnifyingglass" : "bubble.left").font(.system(size: 18)).foregroundStyle(.secondary)
-                TextField("Ask anything", text: $draft)
+                TextField(waiting ? "Waiting for the reply in Chat to finish…" : "Ask anything", text: $draft)
                     .textFieldStyle(.plain).font(.system(size: 20))
                     .focused($focused)
                     .onSubmit(send)
@@ -299,6 +317,9 @@ struct QuickChatView: View {
         .onChange(of: conversation?.messages.count ?? 0) { _, _ in fit() }
         .onAppear { focused = true; fit() }
     }
+
+    /// A reply is being written in another chat; one reply is written at a time.
+    private var waiting: Bool { chat.busy && chat.generating != chat.quickID }
 
     private var conversation: Conversation? {
         chat.quickID.flatMap { id in chat.conversations.first { $0.id == id } }

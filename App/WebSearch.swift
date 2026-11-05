@@ -186,6 +186,10 @@ enum WebSearch {
             Range(match.range(at: index), in: html).map { String(html[$0]) } ?? ""
         }
         return links.enumerated().compactMap { index, match in
+            // Each result's snippet is the one between its link and the next result's link; a result without
+            // one gets none, instead of taking the next result's.
+            let end = index + 1 < links.count ? links[index + 1].range.location : (html as NSString).length
+            let own = snippets.first { $0.range.location > match.range.location && $0.range.location < end }
             var href = HTMLText.decodeEntities(group(match, 1))
             // Some results are wrapped in DuckDuckGo's redirect: //duckduckgo.com/l/?uddg=<the address>
             if href.contains("duckduckgo.com/l/"), let target = URLComponents(string: href.hasPrefix("//") ? "https:" + href : href)?
@@ -193,7 +197,7 @@ enum WebSearch {
                 href = target
             }
             if href.contains("duckduckgo.com/y.js") { return nil }  // an advert
-            let text = index < snippets.count ? group(snippets[index], 1) : ""
+            let text = own.map { group($0, 1) } ?? ""
             return Result(title: HTMLText.inline(group(match, 2)), url: href, snippet: HTMLText.inline(text))
         }
     }
@@ -332,11 +336,52 @@ enum WebSearch {
               let host = url.host?.lowercased(), !host.isEmpty else { return false }
         if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || host.hasSuffix(".internal") { return false }
         var v4 = in_addr(), v6 = in6_addr()
-        if inet_pton(AF_INET, host, &v4) == 1 { return isPublic(withUnsafeBytes(of: &v4) { Array($0) }) }
+        // inet_aton reads every form the system resolver accepts (127.1, 2130706433, 0x7f.0.0.1, 0177.0.0.1),
+        // which inet_pton rejects, so none of them slips through as a "name".
+        if inet_aton(host, &v4) != 0 { return isPublic(withUnsafeBytes(of: &v4) { Array($0) }) }
         let bare = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         if inet_pton(AF_INET6, bare, &v6) == 1 { return isPublic(withUnsafeBytes(of: &v6) { Array($0) }) }
         return true
     }
+
+    /// A picture's bytes, fetched the way pages are: the name must resolve to public addresses, every
+    /// redirect is checked again, and the body must be an image of at most 15 MB.
+    static func imageData(_ address: String) async -> Data? {
+        if let cached = imageCache.object(forKey: address as NSString) { return cached as Data }
+        var current = address
+        let session = URLSession(configuration: .ephemeral, delegate: NoRedirects.shared, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        for _ in 0...maxRedirects {
+            guard loadable(current), let url = URL(string: current), let host = url.host else { return nil }
+            guard (try? await requirePublic(host)) != nil else { return nil }
+            var request = URLRequest(url: url, timeoutInterval: timeout)
+            request.setValue(browser, forHTTPHeaderField: "User-Agent")
+            request.setValue("image/*", forHTTPHeaderField: "Accept")
+            guard let (bytes, response) = try? await session.bytes(for: request), let http = response as? HTTPURLResponse else { return nil }
+            if [301, 302, 303, 307, 308].contains(http.statusCode) {
+                guard let location = http.value(forHTTPHeaderField: "Location"), let next = URL(string: location, relativeTo: url) else { return nil }
+                current = next.absoluteString
+                continue
+            }
+            guard http.statusCode == 200, (http.mimeType ?? "").hasPrefix("image/") else { return nil }
+            var data = Data()
+            do {
+                for try await byte in bytes {
+                    data.append(byte)
+                    if data.count > 15_000_000 { return nil }
+                }
+            } catch { return nil }
+            imageCache.setObject(data as NSData, forKey: address as NSString, cost: data.count)
+            return data
+        }
+        return nil
+    }
+
+    private static let imageCache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.totalCostLimit = 120_000_000
+        return cache
+    }()
 
     // MARK: Reading a page
 
