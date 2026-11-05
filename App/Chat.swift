@@ -1,0 +1,412 @@
+import AppKit
+import Foundation
+
+struct ChatToolCall: Codable, Hashable {
+    var id: String
+    var name: String
+    var arguments: String
+
+    func argument(_ key: String) -> String? {
+        (try? JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any])?[key] as? String
+    }
+}
+
+/// What one tool call did, shown under the reply that made it.
+struct ChatStep: Codable, Hashable {
+    enum Kind: String, Codable { case search, read, other }
+    let callID: String
+    let kind: Kind
+    let subject: String
+    var results: [WebSearch.Result] = []
+    var error: String?
+    var done = false
+}
+
+struct ChatMessage: Codable, Identifiable, Hashable {
+    enum Role: String, Codable { case user, assistant, tool }
+    var id = UUID()
+    var role: Role
+    var text = ""
+    var reasoning = ""
+    /// JPEG images the user attached.
+    var images: [Data] = []
+    var toolCalls: [ChatToolCall] = []
+    var toolCallID: String?
+    var steps: [ChatStep] = []
+    var error: String?
+    var thinkingSeconds: Double?
+    var outputTokens: Int?
+    var tokensPerSecond: Double?
+}
+
+struct Conversation: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var title = "New Chat"
+    var created = Date()
+    var updated = Date()
+    var messages: [ChatMessage] = []
+}
+
+/// Conversations with the loaded model, kept in Application Support/Nearloop/Chats, one file each, and the
+/// loop that streams a reply, runs the web tools it asks for and streams again until it answers.
+@MainActor
+final class ChatStore: ObservableObject {
+    static let shared = ChatStore()
+
+    @Published private(set) var conversations: [Conversation] = []
+    @Published var selectedID: UUID?
+    /// The conversation a reply is being written in.
+    @Published private(set) var generating: UUID?
+    @Published var webSearch: Bool { didSet { Prefs.defaults.set(webSearch, forKey: "chatWebSearch") } }
+    @Published var thinking: Bool { didSet { Prefs.defaults.set(thinking, forKey: "chatThinking") } }
+
+    private var task: Task<Void, Never>?
+    /// Tool rounds per reply; the last round offers no tools, so the model has to answer.
+    private let maxRounds = 8
+
+    private static var folder: URL { AppPaths.support.appendingPathComponent("Chats") }
+
+    private init() {
+        webSearch = Prefs.defaults.object(forKey: "chatWebSearch") as? Bool ?? true
+        thinking = Prefs.defaults.object(forKey: "chatThinking") as? Bool ?? true
+        let files = (try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: nil)) ?? []
+        let decoder = JSONDecoder()
+        conversations = files.filter { $0.pathExtension == "json" }
+            .compactMap { try? decoder.decode(Conversation.self, from: Data(contentsOf: $0)) }
+            .sorted { $0.updated > $1.updated }
+    }
+
+    var selected: Conversation? { conversations.first { $0.id == selectedID } }
+    var busy: Bool { generating != nil }
+
+    // MARK: Conversations
+
+    func newChat() {
+        if let current = selected, current.messages.isEmpty { return }
+        selectedID = nil
+    }
+
+    func rename(_ id: UUID, to title: String) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, let index = index(of: id) else { return }
+        conversations[index].title = clean
+        save(id)
+    }
+
+    func delete(_ id: UUID) {
+        if generating == id { stop() }
+        conversations.removeAll { $0.id == id }
+        try? FileManager.default.removeItem(at: Self.folder.appendingPathComponent("\(id.uuidString).json"))
+        if selectedID == id { selectedID = conversations.first?.id }
+    }
+
+    private func index(of id: UUID) -> Int? { conversations.firstIndex { $0.id == id } }
+
+    private func save(_ id: UUID) {
+        guard let conversation = conversations.first(where: { $0.id == id }) else { return }
+        try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(conversation) {
+            try? data.write(to: Self.folder.appendingPathComponent("\(id.uuidString).json"), options: .atomic)
+        }
+    }
+
+    // MARK: Sending
+
+    func send(_ text: String, images: [Data]) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !busy, !text.isEmpty || !images.isEmpty else { return }
+        let id: UUID
+        if let current = selectedID, index(of: current) != nil {
+            id = current
+        } else {
+            var conversation = Conversation()
+            conversation.title = Self.title(for: text.isEmpty ? "Image" : text)
+            conversations.insert(conversation, at: 0)
+            id = conversation.id
+            selectedID = id
+        }
+        guard let index = index(of: id) else { return }
+        conversations[index].messages.append(ChatMessage(role: .user, text: text, images: images))
+        conversations[index].updated = Date()
+        moveToTop(id)
+        save(id)
+        reply(in: id)
+    }
+
+    /// Writes the last reply again: everything after the last message the user sent goes.
+    func regenerate() {
+        guard !busy, let id = selectedID, let index = index(of: id),
+              let last = conversations[index].messages.lastIndex(where: { $0.role == .user }) else { return }
+        conversations[index].messages.removeSubrange((last + 1)...)
+        reply(in: id)
+    }
+
+    func stop() {
+        task?.cancel()
+    }
+
+    private func moveToTop(_ id: UUID) {
+        guard let index = index(of: id), index > 0 else { return }
+        conversations.insert(conversations.remove(at: index), at: 0)
+    }
+
+    static func title(for text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return line.count > 48 ? String(line.prefix(47)).trimmingCharacters(in: .whitespaces) + "…" : line
+    }
+
+    private func reply(in id: UUID) {
+        generating = id
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.generating = nil; self.save(id) }
+            do {
+                try await AppStore.shared.ensureServer(purpose: "Chat", context: Self.context)
+            } catch {
+                self.append(ChatMessage(role: .assistant, error: error.localizedDescription), to: id)
+                return
+            }
+            for round in 0..<self.maxRounds {
+                let tools = self.webSearch && round < self.maxRounds - 1
+                guard let messageID = self.append(ChatMessage(role: .assistant), to: id) else { return }
+                let calls: [ChatToolCall]
+                do {
+                    calls = try await self.stream(id, into: messageID, tools: tools)
+                } catch is CancellationError {
+                    self.update(id, messageID) { if $0.text.isEmpty && $0.reasoning.isEmpty { $0.error = "Stopped." } }
+                    return
+                } catch let error as URLError where error.code == .cancelled {
+                    self.update(id, messageID) { if $0.text.isEmpty && $0.reasoning.isEmpty { $0.error = "Stopped." } }
+                    return
+                } catch {
+                    self.update(id, messageID) { $0.error = error.localizedDescription }
+                    return
+                }
+                guard tools, !calls.isEmpty else { return }
+                for call in calls {
+                    if Task.isCancelled { return }
+                    await self.run(call, in: id, from: messageID)
+                }
+            }
+        }
+    }
+
+    /// Chat suits 64K of context; a model with less gets its largest preset.
+    nonisolated static func context(_ model: LocalModel) -> String {
+        model.contexts.contains("64k") ? "64k" : model.largestPreset
+    }
+
+    @discardableResult
+    private func append(_ message: ChatMessage, to id: UUID) -> UUID? {
+        guard let index = index(of: id) else { return nil }
+        conversations[index].messages.append(message)
+        return message.id
+    }
+
+    private func update(_ id: UUID, _ messageID: UUID, _ change: (inout ChatMessage) -> Void) {
+        guard let index = index(of: id), let at = conversations[index].messages.firstIndex(where: { $0.id == messageID }) else { return }
+        change(&conversations[index].messages[at])
+    }
+
+    // MARK: Tools
+
+    private func run(_ call: ChatToolCall, in id: UUID, from messageID: UUID) async {
+        let payload: String
+        switch call.name {
+        case "web_search":
+            let query = call.argument("query") ?? ""
+            update(id, messageID) { $0.steps.append(ChatStep(callID: call.id, kind: .search, subject: query)) }
+            switch await WebSearch.search(query) {
+            case .success(let results):
+                payload = WebSearch.payload(results)
+                step(id, messageID, call.id) { $0.results = results; $0.done = true }
+            case .failure(let failure):
+                payload = WebSearch.payload(failure)
+                step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
+            }
+        case "fetch_url":
+            let address = call.argument("url") ?? ""
+            update(id, messageID) { $0.steps.append(ChatStep(callID: call.id, kind: .read, subject: address)) }
+            switch await WebSearch.fetch(address) {
+            case .success(let page):
+                payload = WebSearch.payload(page)
+                step(id, messageID, call.id) { $0.done = true }
+            case .failure(let failure):
+                payload = WebSearch.payload(failure)
+                step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
+            }
+        default:
+            payload = WebSearch.payload(WebSearch.Failure(code: "unknown_tool", message: "There is no tool named \(call.name)."))
+            update(id, messageID) { $0.steps.append(ChatStep(callID: call.id, kind: .other, subject: call.name, error: "Unknown tool", done: true)) }
+        }
+        var result = ChatMessage(role: .tool, text: payload)
+        result.toolCallID = call.id
+        append(result, to: id)
+    }
+
+    private func step(_ id: UUID, _ messageID: UUID, _ callID: String, _ change: (inout ChatStep) -> Void) {
+        update(id, messageID) { message in
+            if let at = message.steps.firstIndex(where: { $0.callID == callID }) { change(&message.steps[at]) }
+        }
+    }
+
+    // MARK: Streaming
+
+    private func systemPrompt(tools: Bool) -> String {
+        let now = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year().hour().minute())
+        var prompt = "You are a helpful assistant running privately on the user’s Mac in Nearloop. It is \(now) (\(TimeZone.current.identifier)). Format answers in Markdown."
+        if tools {
+            prompt += " You can search the web with web_search and read a page with fetch_url. Use them when a question needs current, specific or verifiable information; otherwise answer directly. Search with short keyword queries and read a page when the snippets aren’t enough. When you use information from the web, cite it inline as a Markdown link to the page, like [Reuters](https://www.reuters.com/…). If a tool reports an error, tell the user what happened."
+        }
+        return prompt
+    }
+
+    private func requestMessages(_ conversation: Conversation, tools: Bool) -> [[String: Any]] {
+        var messages: [[String: Any]] = [["role": "system", "content": systemPrompt(tools: tools)]]
+        for message in conversation.messages {
+            switch message.role {
+            case .user:
+                if message.images.isEmpty {
+                    messages.append(["role": "user", "content": message.text])
+                } else {
+                    var parts: [[String: Any]] = message.images.map {
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\($0.base64EncodedString())"]]
+                    }
+                    if !message.text.isEmpty { parts.append(["type": "text", "text": message.text]) }
+                    messages.append(["role": "user", "content": parts])
+                }
+            case .assistant:
+                guard !message.text.isEmpty || !message.toolCalls.isEmpty else { continue }
+                var entry: [String: Any] = ["role": "assistant", "content": message.text]
+                if !message.toolCalls.isEmpty {
+                    entry["tool_calls"] = message.toolCalls.map {
+                        ["id": $0.id, "type": "function", "function": ["name": $0.name, "arguments": $0.arguments]]
+                    }
+                }
+                messages.append(entry)
+            case .tool:
+                messages.append(["role": "tool", "tool_call_id": message.toolCallID ?? "", "content": message.text])
+            }
+        }
+        return messages
+    }
+
+    /// Streams one response from Kapitsa into the message; returns the tool calls it asked for.
+    private func stream(_ id: UUID, into messageID: UUID, tools: Bool) async throws -> [ChatToolCall] {
+        guard let conversation = conversations.first(where: { $0.id == id }) else { return [] }
+        let server = ServerController.shared
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(server.port)/v1/chat/completions")!, timeoutInterval: 900)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Nearloop/\(Updater.currentVersion)", forHTTPHeaderField: "User-Agent")
+        if !server.apiKey.isEmpty { request.setValue("Bearer \(server.apiKey)", forHTTPHeaderField: "Authorization") }
+        var body: [String: Any] = [
+            "model": server.record?.apiId ?? "local",
+            "messages": requestMessages(conversation, tools: tools),
+            "stream": true,
+            "stream_options": ["include_usage": true],
+            "chat_template_kwargs": ["enable_thinking": thinking],
+        ]
+        if tools { body["tools"] = WebSearch.tools }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            var data = Data()
+            for try await byte in bytes { data.append(byte); if data.count > 100_000 { break } }
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let message = ((object?["error"] as? [String: Any])?["message"] as? String) ?? (object?["error"] as? String)
+                ?? String(decoding: data.prefix(300), as: UTF8.self)
+            throw Kapitsa.Failure(errorDescription: "The model couldn’t answer: \(message.isEmpty ? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)" : message)")
+        }
+
+        let started = Date()
+        var firstText: Date?, firstToken: Date?
+        var text = "", reasoning = "", outputTokens: Int?
+        var calls: [Int: ChatToolCall] = [:]
+        var lastPush = Date.distantPast
+        func push(final: Bool) {
+            guard final || Date().timeIntervalSince(lastPush) > 0.06 else { return }
+            lastPush = Date()
+            let (t, r) = (text, reasoning)
+            update(id, messageID) { $0.text = t; $0.reasoning = r }
+        }
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { break }
+            guard let object = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+            if let usage = object["usage"] as? [String: Any] { outputTokens = usage["completion_tokens"] as? Int }
+            if let error = object["error"] as? [String: Any] {
+                throw Kapitsa.Failure(errorDescription: error["message"] as? String ?? "The model stopped with an error.")
+            }
+            guard let choice = (object["choices"] as? [[String: Any]])?.first, let delta = choice["delta"] as? [String: Any] else { continue }
+            if let piece = delta["reasoning_content"] as? String, !piece.isEmpty {
+                if firstToken == nil { firstToken = Date() }
+                reasoning += piece
+            }
+            if let piece = delta["content"] as? String, !piece.isEmpty {
+                if firstText == nil { firstText = Date() }
+                if firstToken == nil { firstToken = Date() }
+                text += piece
+            }
+            for item in (delta["tool_calls"] as? [[String: Any]]) ?? [] {
+                let index = item["index"] as? Int ?? calls.count
+                var call = calls[index] ?? ChatToolCall(id: "", name: "", arguments: "")
+                if let callID = item["id"] as? String, !callID.isEmpty { call.id = callID }
+                if let function = item["function"] as? [String: Any] {
+                    if let name = function["name"] as? String { call.name += name }
+                    if let arguments = function["arguments"] as? String { call.arguments += arguments }
+                }
+                calls[index] = call
+            }
+            push(final: false)
+        }
+        push(final: true)
+        let ordered = calls.keys.sorted().compactMap { calls[$0] }.map { call -> ChatToolCall in
+            var call = call
+            if call.id.isEmpty { call.id = "call_\(UUID().uuidString.prefix(12))" }
+            return call
+        }
+        let ended = Date()
+        update(id, messageID) { message in
+            message.toolCalls = ordered
+            if !message.reasoning.isEmpty { message.thinkingSeconds = (firstText ?? ended).timeIntervalSince(started) }
+            if let outputTokens, outputTokens > 1 {
+                message.outputTokens = outputTokens
+                // Writing speed: from the first token, so reading the prompt doesn't count against it.
+                let writing = ended.timeIntervalSince(firstToken ?? started)
+                if writing > 0.2 { message.tokensPerSecond = Double(outputTokens - 1) / writing }
+            }
+        }
+        return ordered
+    }
+
+    // MARK: Images
+
+    /// An image file as a JPEG no larger than 1600 pixels on its long side.
+    nonisolated static func jpeg(from url: URL) -> Data? {
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        return jpeg(from: image)
+    }
+
+    nonisolated static func jpeg(from image: NSImage) -> Data? {
+        guard let rep = image.representations.first else { return nil }
+        let width = CGFloat(rep.pixelsWide > 0 ? rep.pixelsWide : Int(image.size.width))
+        let height = CGFloat(rep.pixelsHigh > 0 ? rep.pixelsHigh : Int(image.size.height))
+        guard width > 0, height > 0 else { return nil }
+        let scale = min(1, 1600 / max(width, height))
+        let size = NSSize(width: (width * scale).rounded(), height: (height * scale).rounded())
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        NSColor.white.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        image.draw(in: NSRect(origin: .zero, size: size))
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+    }
+}

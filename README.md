@@ -11,6 +11,7 @@ A Mac app for running language models locally and using them with coding agents:
 > **Built on Kapitsa.** The engine, its KFlash speculative decoding, the model catalog and the benchmark protocol are the Kapitsa project's work: [github.com/nace-ai/kapitsa](https://github.com/nace-ai/kapitsa). This app is an independent desktop front end for it.
 
 - **Discover** models in Kapitsa's catalog (Qwen3.5, 3.6 and 3.8, NVIDIA Nemotron, Dory, Flint, Clover) or search Hugging Face for compatible MLX models. Each one shows whether it fits your Mac. Downloads show progress and resume after a pause.
+- **Chat** with the loaded model, like ChatGPT or Claude: conversations saved on your Mac, Markdown and code blocks, images, an optional thinking step, and web search. The model can search the web (DuckDuckGo with no key, or Brave Search or your own SearXNG) and read pages, and shows each search and the sources it used.
 - **Start an agent** in a project folder with one click. If no model is running, the app loads your agent model first, then opens the agent in Terminal or Ghostty. Before it launches, it checks that the agent's prompt fits the model's context (it learns each agent's real prompt size on your Mac) and warns you when it won't.
 - **Never run out of memory.** Kapitsa is capped below the memory that is free when a model loads, so loading never pushes macOS into swap; a model that doesn't fit is refused with a clear message.
 - **Measure** writing and reading speed, time to first token, tool-call support and peak memory with Kapitsa's own benchmark. The benchmark stops itself if memory pressure turns critical.
@@ -76,7 +77,7 @@ Other apps can use the running model too. The base URL is `http://127.0.0.1:8000
 
 ## Privacy
 
-Everything runs on your Mac. The app contacts the network only to download models you choose (from Hugging Face, through Kapitsa) and to search Hugging Face when you use that tab. Once a day it asks GitHub for the latest release, unless you turn that off in Settings › General; the request carries only the app's version. It has no accounts and no telemetry. The server listens only on this Mac unless you turn on network visibility.
+Everything runs on your Mac. The app contacts the network only to download models you choose (from Hugging Face, through Kapitsa) and to search Hugging Face when you use that tab. In Chat, when web search is on and the model decides to search, Nearloop sends the search words to the search provider you chose and fetches the pages the model reads; your conversations stay on the Mac. Once a day it asks GitHub for the latest release, unless you turn that off in Settings › General; the request carries only the app's version. It has no accounts and no telemetry. The server listens only on this Mac unless you turn on network visibility.
 
 ## Building
 
@@ -105,5 +106,6 @@ Nearloop is licensed under the [Apache License 2.0](LICENSE). The bundled Kapits
 
 - **Inference engine:** [Kapitsa](https://github.com/nace-ai/kapitsa) by Nace AI, Apache License 2.0. Its license and third-party notices ship in the app at `Contents/Resources/kapitsa-licenses`. Nearloop is an independent front end and is not affiliated with or endorsed by the Kapitsa project.
 - **Benchmark data** in this README is published by the Kapitsa project (sources above).
+- **Chat web search** follows the design of [oMLX](https://github.com/jundot/omlx)'s built-in web search (Apache License 2.0), written again in Swift.
 - **Coding agents** are products of their makers: Claude Code (Anthropic), OpenCode (SST), Codex CLI (OpenAI) and Pi (Mario Zechner).
 - **Models** keep their own licenses; check each model's card before use.

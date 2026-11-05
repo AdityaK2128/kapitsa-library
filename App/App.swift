@@ -25,6 +25,7 @@ struct MainWindow: View {
                 Group {
                     switch store.page {
                     case .home: HomeView()
+                    case .chat: ChatView()
                     case .discover: DiscoverView()
                     case .models: ModelsView()
                     case .agents: AgentsView()
@@ -123,7 +124,6 @@ struct MenuBarContent: View {
             Button("Load \(model.name)") { store.loadLast() }
         }
         if server.phase == .ready || server.phase == .external {
-            Button("Open Chat") { NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(server.port)")!) }
             Button("Copy API URL") { store.copy("http://127.0.0.1:\(server.port)/v1", "API URL copied.") }
         }
         Divider()
@@ -139,6 +139,7 @@ struct MenuBarContent: View {
             if store.agents.isEmpty { Text("No Agents Installed") }
         }
         Divider()
+        Button("Open Chat") { store.page = .chat; openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         Button("Open Nearloop") { openWindow(id: "main"); NSApp.activate(ignoringOtherApps: true) }
         CheckForUpdatesButton()
         SettingsLink { Text("Settings…") }
@@ -236,6 +237,8 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 LabeledContent("System Memory", value: String(format: "%.0f GB total · %.0f GB available", SystemMemory.totalGB, SystemMemory.availableGB()))
             }.formStyle(.grouped).tabItem { Label("Memory", systemImage: "memorychip") }
+
+            ChatSettings().tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
 
             Form {
                 LabeledContent("Data Location") {

@@ -3,11 +3,12 @@ import SwiftUI
 
 enum Page: String, CaseIterable, Identifiable {
     // Sidebar order: what's happening now and what happened, then the models, then the agents that use them.
-    case home, usage, models, discover, benchmarks, agents
+    case home, chat, usage, models, discover, benchmarks, agents
     var id: String { rawValue }
     var title: String {
         switch self {
         case .home: return "Home"
+        case .chat: return "Chat"
         case .usage: return "Usage"
         case .models: return "Library"
         case .discover: return "Discover"
@@ -18,6 +19,7 @@ enum Page: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .home: return "house"
+        case .chat: return "bubble.left.and.bubble.right"
         case .usage: return "chart.bar.xaxis"
         case .models: return "square.stack.3d.up"
         case .discover: return "sparkle.magnifyingglass"
@@ -28,7 +30,7 @@ enum Page: String, CaseIterable, Identifiable {
     /// The sidebar group; nil for the overview pages at the top.
     var section: String? {
         switch self {
-        case .home, .usage: return nil
+        case .home, .chat, .usage: return nil
         case .models, .discover, .benchmarks: return "Models"
         case .agents: return "Agents"
         }
@@ -386,6 +388,12 @@ final class AppStore: ObservableObject {
 
     /// Loads the agent model when nothing is serving, and waits until it answers.
     func ensureServer(for agent: String) async throws {
+        try await ensureServer(purpose: Agents.displayName(agent)) { [weak self] model in self?.agentContext(agent, model) ?? model.largestPreset }
+    }
+
+    /// Loads the default model (`agentModel`) for whatever needs one, a chat or an agent, unless one is
+    /// serving already, and waits until it answers.
+    func ensureServer(purpose: String, context: (LocalModel) -> String) async throws {
         if server.phase == .ready || server.phase == .external { return }
         guard let model = agentModel else {
             throw Kapitsa.Failure(errorDescription: "No model available. Download one from Discover or add a model folder.")
@@ -393,14 +401,14 @@ final class AppStore: ObservableObject {
         // Registered before the start, so a start that throws still clears the launch state.
         defer { launching = nil }
         if !server.running {
-            launching = "Starting \(model.name) for \(Agents.displayName(agent))…"
-            try server.start(model, context: agentContext(agent, model))
+            launching = "Starting \(model.name) for \(purpose)…"
+            try server.start(model, context: context(model))
         }
         while server.phase == .starting {
             try await Task.sleep(nanoseconds: 500_000_000)
         }
         guard server.phase == .ready else {
-            throw Kapitsa.Failure(errorDescription: "The model failed to start, so \(Agents.displayName(agent)) didn’t run. See Logs for details.")
+            throw Kapitsa.Failure(errorDescription: "The model failed to start, so \(purpose) couldn’t use it. See Logs for details.")
         }
     }
 
