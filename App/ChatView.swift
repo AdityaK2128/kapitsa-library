@@ -544,14 +544,17 @@ private struct Composer: View {
                 }
             }
             ZStack(alignment: .topLeading) {
-                // Sizes the editor to its text, up to about ten lines.
-                Text(draft.isEmpty ? " " : draft + " ").font(.body).padding(.horizontal, 5).padding(.vertical, 8)
+                // Sizes the editor to its text, up to about ten lines. The editor, the placeholder and this sizer
+                // share one inset (the text view's 5-point line padding, 6 points above), so the caret sits on
+                // the placeholder's line.
+                Text(draft.isEmpty ? " " : draft + " ").font(.body).padding(.horizontal, 5).padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading).opacity(0)
                 if draft.isEmpty {
-                    Text("Message").foregroundStyle(.tertiary).padding(.horizontal, 5).padding(.vertical, 8).allowsHitTesting(false)
+                    Text("Message").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 5).padding(.vertical, 6).allowsHitTesting(false)
                 }
                 TextEditor(text: $draft)
-                    .font(.body).scrollContentBackground(.hidden).focused($focused)
+                    .font(.body).scrollContentBackground(.hidden).scrollIndicators(.never).focused($focused)
+                    .padding(.vertical, 6)
                     .onKeyPress(.return, phases: .down) { press in
                         // Return sends; Shift-Return (or Option-Return) starts a new line.
                         if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
@@ -562,10 +565,9 @@ private struct Composer: View {
             .frame(minHeight: 34, maxHeight: 200).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
                 Button { attach() } label: { Image(systemName: "paperclip") }.buttonStyle(.borderless).help("Attach Images")
-                Toggle(isOn: $chat.webSearch) { Label("Search", systemImage: "globe") }
-                    .toggleStyle(.button).help("Let the model search the web and read pages (\(WebSearch.provider.title))")
-                Toggle(isOn: $chat.thinking) { Label("Think", systemImage: "brain") }
-                    .toggleStyle(.button).help("Let the model reason before answering; slower, often better")
+                Button { chat.webSearch.toggle() } label: { Chip(title: "Search", symbol: "globe", on: chat.webSearch) }
+                    .buttonStyle(.plain).help("Let the model search the web, read pages and find images (\(WebSearch.provider.title))")
+                ThinkingMenu(chat: chat)
                 Spacer()
                 if chat.busy {
                     Button { chat.stop() } label: { Image(systemName: "stop.circle.fill").font(.system(size: 24)) }
@@ -622,6 +624,48 @@ private struct Composer: View {
                 Task { @MainActor in images.append(data) }
             }
         }
+    }
+}
+
+/// A setting shown as a capsule: filled with the accent colour when on, quiet when off.
+struct Chip: View {
+    let title: String
+    let symbol: String
+    let on: Bool
+    var trailing: String?
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol)
+            Text(title)
+            if let trailing { Image(systemName: trailing).font(.system(size: 8, weight: .bold)).opacity(0.8) }
+        }
+        .font(.callout.weight(on ? .semibold : .regular))
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .foregroundStyle(on ? Color.white : Color.secondary)
+        .background(Capsule().fill(on ? Color.accentColor : Color.primary.opacity(0.06)))
+        .overlay(Capsule().strokeBorder(on ? Color.clear : Color.primary.opacity(0.1)))
+        .contentShape(Capsule())
+        .animation(.snappy(duration: 0.15), value: on)
+    }
+}
+
+/// Off, Auto, Medium or High, from a menu on the Think chip.
+struct ThinkingMenu: View {
+    @ObservedObject var chat: ChatStore
+
+    var body: some View {
+        Menu {
+            Picker("Thinking", selection: $chat.thinking) {
+                ForEach(ThinkingLevel.allCases) { level in
+                    Text("\(level.title) — \(level.detail)").tag(level)
+                }
+            }.pickerStyle(.inline)
+        } label: {
+            Chip(title: chat.thinking == .off ? "Think" : "Think: \(chat.thinking.title)", symbol: "brain", on: chat.thinking != .off, trailing: "chevron.down")
+        }
+        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+        .help("How much the model reasons before answering")
     }
 }
 

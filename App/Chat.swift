@@ -1,6 +1,63 @@
 import AppKit
 import Foundation
 
+/// How much the model reasons before it answers. Kapitsa switches a model's thinking on or off; the levels
+/// above that are guidance in the system prompt (measured: High about twice Medium's reasoning on Ornith 9B)
+/// plus reasoning_effort, which models that support it (Dory) read directly.
+enum ThinkingLevel: String, CaseIterable, Identifiable {
+    case off, auto, medium, high
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .auto: return "Auto"
+        case .medium: return "Medium"
+        case .high: return "High"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .off: return "Answers straight away"
+        case .auto: return "Thinks when the question needs it"
+        case .medium: return "Thinks briefly first"
+        case .high: return "Thinks it through and checks its work"
+        }
+    }
+
+    /// Auto: think for questions that need reasoning, answer quick ones straight away.
+    func thinks(about message: ChatMessage?) -> Bool {
+        switch self {
+        case .off: return false
+        case .medium, .high: return true
+        case .auto:
+            guard let message else { return false }
+            let text = message.text.lowercased()
+            if !message.images.isEmpty || text.count > 280 || text.contains("```") { return true }
+            if text.range(of: #"[0-9]\s*[-+*/^=]\s*[0-9(]"#, options: .regularExpression) != nil { return true }
+            let reasoning = ["why", "how does", "how do", "how would", "how can", "explain", "compare", "difference between", "versus", " vs ",
+                             "plan", "design", "solve", "prove", "calculate", "debug", "fix", "optimi", "analy", "step by step", "should i",
+                             "pros and cons", "trade-off", "tradeoff", "write a", "code", "function", "algorithm", "reason", "evaluate"]
+            return reasoning.contains { text.contains($0) }
+        }
+    }
+
+    var effort: String? {
+        switch self {
+        case .medium: return "medium"
+        case .high: return "high"
+        default: return nil
+        }
+    }
+
+    var guidance: String? {
+        switch self {
+        case .medium: return "Think briefly before answering: keep your reasoning short and focused, a few sentences."
+        case .high: return "Think carefully and thoroughly before answering: work through the problem step by step, consider alternatives and check your work."
+        default: return nil
+        }
+    }
+}
+
 struct ChatToolCall: Codable, Hashable {
     var id: String
     var name: String
@@ -62,7 +119,7 @@ final class ChatStore: ObservableObject {
     /// The conversation the Quick Chat window shows; it stays in the history like any other.
     @Published var quickID: UUID?
     @Published var webSearch: Bool { didSet { Prefs.defaults.set(webSearch, forKey: "chatWebSearch") } }
-    @Published var thinking: Bool { didSet { Prefs.defaults.set(thinking, forKey: "chatThinking") } }
+    @Published var thinking: ThinkingLevel { didSet { Prefs.defaults.set(thinking.rawValue, forKey: "chatThinkingLevel") } }
 
     private var task: Task<Void, Never>?
     /// Tool rounds per reply; the last round offers no tools, so the model has to answer.
@@ -72,7 +129,9 @@ final class ChatStore: ObservableObject {
 
     private init() {
         webSearch = Prefs.defaults.object(forKey: "chatWebSearch") as? Bool ?? true
-        thinking = Prefs.defaults.object(forKey: "chatThinking") as? Bool ?? true
+        // The earlier on/off switch carries over: off stays off, on becomes Auto.
+        thinking = ThinkingLevel(rawValue: Prefs.defaults.string(forKey: "chatThinkingLevel") ?? "")
+            ?? ((Prefs.defaults.object(forKey: "chatThinking") as? Bool) == false ? .off : .auto)
         let files = (try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: nil)) ?? []
         let decoder = JSONDecoder()
         conversations = files.filter { $0.pathExtension == "json" }
@@ -300,8 +359,10 @@ final class ChatStore: ObservableObject {
         return prompt
     }
 
-    private func requestMessages(_ conversation: Conversation, tools: Bool) -> [[String: Any]] {
-        var messages: [[String: Any]] = [["role": "system", "content": systemPrompt(tools: tools)]]
+    private func requestMessages(_ conversation: Conversation, tools: Bool, thinks: Bool) -> [[String: Any]] {
+        var system = systemPrompt(tools: tools)
+        if thinks, let guidance = thinking.guidance { system += "\n\n" + guidance }
+        var messages: [[String: Any]] = [["role": "system", "content": system]]
         for message in conversation.messages {
             switch message.role {
             case .user:
@@ -333,6 +394,7 @@ final class ChatStore: ObservableObject {
     /// Streams one response from Kapitsa into the message; returns the tool calls it asked for.
     private func stream(_ id: UUID, into messageID: UUID, tools: Bool) async throws -> [ChatToolCall] {
         guard let conversation = conversations.first(where: { $0.id == id }) else { return [] }
+        let thinks = thinking.thinks(about: conversation.messages.last { $0.role == .user })
         let server = ServerController.shared
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(server.port)/v1/chat/completions")!, timeoutInterval: 900)
         request.httpMethod = "POST"
@@ -341,11 +403,12 @@ final class ChatStore: ObservableObject {
         if !server.apiKey.isEmpty { request.setValue("Bearer \(server.apiKey)", forHTTPHeaderField: "Authorization") }
         var body: [String: Any] = [
             "model": server.record?.apiId ?? "local",
-            "messages": requestMessages(conversation, tools: tools),
+            "messages": requestMessages(conversation, tools: tools, thinks: thinks),
             "stream": true,
             "stream_options": ["include_usage": true],
-            "chat_template_kwargs": ["enable_thinking": thinking],
+            "chat_template_kwargs": ["enable_thinking": thinks],
         ]
+        if thinks, let effort = thinking.effort { body["reasoning_effort"] = effort }
         if tools { body["tools"] = WebSearch.tools }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 

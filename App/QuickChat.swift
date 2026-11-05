@@ -275,8 +275,8 @@ struct QuickChatView: View {
                     Button { chat.stop() } label: { Image(systemName: "stop.circle.fill").font(.system(size: 20)) }
                         .buttonStyle(.plain).foregroundStyle(.secondary).help("Stop")
                 }
-                Toggle(isOn: $chat.webSearch) { Image(systemName: "globe") }
-                    .toggleStyle(.button).buttonStyle(.borderless).help("Search the web")
+                Button { chat.webSearch.toggle() } label: { Chip(title: "Search", symbol: "globe", on: chat.webSearch) }
+                    .buttonStyle(.plain).help("Search the web")
             }
             .padding(.horizontal, 18).frame(height: 60)
             if let conversation {
