@@ -210,8 +210,7 @@ private struct ChatThread: View {
         let shown = conversation.messages.filter { $0.role != .tool }
         let writing = chat.generating == conversation.id
         let lastAssistant = shown.last?.role == .assistant ? shown.last?.id : nil
-        return ScrollViewReader { proxy in
-            ScrollView {
+        return FollowingScroll(growth: Self.growth(shown), restart: "\(conversation.id)-\(shown.filter { $0.role == .user }.count)", writing: writing) {
                 LazyVStack(alignment: .leading, spacing: 22) {
                     ForEach(shown) { message in
                         if message.role == .user {
@@ -229,20 +228,14 @@ private struct ChatThread: View {
                             Button("Retry") { chat.regenerate(in: conversation.id) }.disabled(chat.busy)
                         }.font(.callout)
                     }
-                    Color.clear.frame(height: 1).id("bottom")
                 }
                 .frame(maxWidth: 780)
                 .padding(.horizontal, 28).padding(.vertical, 24)
                 .frame(maxWidth: .infinity)
-            }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: conversation.id) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: shown.last.map { $0.text.count + $0.reasoning.count + $0.steps.count } ?? 0) { _, _ in
-                if writing { proxy.scrollTo("bottom", anchor: .bottom) }
-            }
-            .onChange(of: shown.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
         }
     }
+
+    static func growth(_ shown: [ChatMessage]) -> Int { ChatThreadGrowth.of(shown) }
 
     private var welcome: some View {
         VStack(spacing: 12) {
@@ -667,6 +660,103 @@ struct ThinkingMenu: View {
         .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
         .help("How much the model reasons before answering")
     }
+}
+
+enum ChatThreadGrowth {
+    /// Changes whenever the reply being written grows.
+    static func of(_ shown: [ChatMessage]) -> Int {
+        shown.count * 1_000_003 + (shown.last.map { $0.text.count + $0.reasoning.count + $0.steps.count * 7 + $0.steps.filter(\.done).count } ?? 0)
+    }
+}
+
+/// A conversation's scroll view that follows a reply as it is written, as ChatGPT and Claude do: scrolling up
+/// to read (the thinking, an earlier answer) stops following; scrolling back to the end, the ↓ button or
+/// sending a new message resumes it.
+struct FollowingScroll<Content: View>: View {
+    /// Changes as the reply grows.
+    let growth: Int
+    /// Changes when following should start over: another conversation, or a new message from the user.
+    let restart: String
+    let writing: Bool
+    @ViewBuilder var content: Content
+
+    @State private var following = true
+    @State private var viewport: CGRect = .zero
+    @State private var monitor: Any?
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    content
+                    // The end of the conversation; how far below the visible area it is says whether the
+                    // reader is at the end.
+                    Color.clear.frame(height: 1).id("bottom")
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: EndOffset.self, value: geometry.frame(in: .named("conversation")).minY)
+                        })
+                }
+            }
+            .coordinateSpace(name: "conversation")
+            .background(GeometryReader { geometry in
+                Color.clear
+                    .onAppear { viewport = geometry.frame(in: .global) }
+                    .onChange(of: geometry.frame(in: .global)) { _, frame in viewport = frame }
+            })
+            // Back at the end (within a line or two): follow again. Growth alone never stops following.
+            .onPreferenceChange(EndOffset.self) { end in
+                if !following && end <= viewport.height + 40 { following = true }
+            }
+            .onChange(of: growth) { _, _ in
+                if following { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onChange(of: restart) { _, _ in
+                following = true
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .onAppear {
+                proxy.scrollTo("bottom", anchor: .bottom)
+                watchScrolling()
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
+            .overlay(alignment: .bottom) {
+                if !following {
+                    Button {
+                        following = true
+                        withAnimation(.snappy) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    } label: {
+                        Image(systemName: "arrow.down").font(.system(size: 13, weight: .semibold))
+                            .frame(width: 32, height: 32)
+                            .background(Circle().fill(.regularMaterial))
+                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.12)))
+                            .shadow(color: .black.opacity(0.2), radius: 4, y: 1)
+                    }
+                    .buttonStyle(.plain).padding(.bottom, 12)
+                    .help(writing ? "Follow the reply" : "Scroll to the end")
+                    .transition(.opacity)
+                }
+            }
+        }
+    }
+
+    /// A scroll toward the top over this view means the reader wants to read: stop following.
+    private func watchScrolling() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard event.scrollingDeltaY > 0.5, let window = event.window, let content = window.contentView else { return event }
+            let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
+            if viewport.contains(point) { following = false }
+            return event
+        }
+    }
+}
+
+private struct EndOffset: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 // MARK: - Markdown

@@ -319,8 +319,7 @@ struct QuickChatView: View {
     private func thread(_ conversation: Conversation) -> some View {
         let shown = conversation.messages.filter { $0.role != .tool }
         let writing = chat.generating == conversation.id
-        return ScrollViewReader { proxy in
-            ScrollView {
+        return FollowingScroll(growth: ChatThreadGrowth.of(shown), restart: "\(conversation.id)-\(shown.filter { $0.role == .user }.count)", writing: writing) {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     ForEach(shown) { message in
                         if message.role == .user {
@@ -334,14 +333,8 @@ struct QuickChatView: View {
                     if let launching = store.launching, writing {
                         ProgressView(launching).controlSize(.small)
                     }
-                    Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(18)
-            }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: shown.last.map { $0.text.count + $0.reasoning.count + $0.steps.count } ?? 0) { _, _ in
-                proxy.scrollTo("bottom", anchor: .bottom)
-            }
         }
     }
 
