@@ -981,7 +981,7 @@ struct ChatSettings: View {
             }
             switch WebSearch.Provider(rawValue: provider) ?? .duckduckgo {
             case .duckduckgo:
-                Text("Free and needs no key. DuckDuckGo may ask to slow down after many searches; Brave Search or SearXNG avoid that.")
+                Text("Free, with no key: DuckDuckGo first; when it refuses, Wikipedia, then the open Mwmbl index. Pictures come from DuckDuckGo or Wikimedia Commons. An engine that refuses is skipped for 30 minutes. For the steadiest results, use Brave Search (its API has a free tier) or your own SearXNG.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             case .brave:
                 SecureField("API Key", text: $braveKey, prompt: Text("From api-dashboard.search.brave.com"))

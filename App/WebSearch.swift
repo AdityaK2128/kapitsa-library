@@ -12,7 +12,7 @@ enum WebSearch {
         var id: String { rawValue }
         var title: String {
             switch self {
-            case .duckduckgo: return "DuckDuckGo"
+            case .duckduckgo: return "No Key Needed"
             case .brave: return "Brave Search"
             case .searxng: return "SearXNG"
             }
@@ -109,7 +109,7 @@ enum WebSearch {
         do {
             let rows: [Result]
             switch provider {
-            case .duckduckgo: rows = try await duckDuckGo(trimmed)
+            case .duckduckgo: rows = try await keyless(trimmed)
             case .brave: rows = try await brave(trimmed)
             case .searxng: rows = try await searxng(trimmed)
             }
@@ -158,6 +158,121 @@ enum WebSearch {
         }
     }
 
+    // MARK: Keyless fallbacks
+
+    /// Engines that refused lately (throttled, or asking to prove a person is searching), and until when
+    /// they are skipped, so every search doesn't wait on them first.
+    private static var resting: [String: Date] = [:]
+    private static let restLock = NSLock()
+
+    private static func rests(_ engine: String) -> Bool {
+        restLock.withLock { (resting[engine] ?? .distantPast) > Date() }
+    }
+
+    private static func rest(_ engine: String) {
+        restLock.withLock { resting[engine] = Date().addingTimeInterval(30 * 60) }
+    }
+
+    /// No key needed: DuckDuckGo, then Wikipedia's API, then Mwmbl's open search API. Each engine that refuses
+    /// or comes back empty hands over to the next; only when all fail is the search a failure. A site that
+    /// blocks automated searches is left alone (skipped for a while), never worked around.
+    private static func keyless(_ query: String) async throws -> [Result] {
+        var problems: [String] = []
+        let engines: [(String, (String) async throws -> [Result])] = [("DuckDuckGo", duckDuckGo), ("Wikipedia", wikipedia), ("Mwmbl", mwmbl)]
+        for (name, engine) in engines where !rests(name) {
+            do {
+                let rows = try await engine(query)
+                if !rows.isEmpty { return rows }
+                problems.append("\(name) found nothing")
+            } catch let failure as Failure {
+                if ["rate_limited", "provider_unavailable", "request_failed"].contains(failure.code) { rest(name) }
+                problems.append("\(name): \(failure.message)")
+            } catch {
+                problems.append("\(name): \(error.localizedDescription)")
+            }
+        }
+        if problems.isEmpty { problems.append("every engine refused searches recently; they are tried again in a few minutes") }
+        throw Failure(code: "provider_unavailable",
+                      message: "Web search isn’t available right now (\(problems.joined(separator: "; "))). Brave Search with a free API key, or a SearXNG server, in \(settingsHint) avoids this.",
+                      needsUser: true)
+    }
+
+    private static func keylessImages(_ query: String) async throws -> [ImageResult] {
+        var problems: [String] = []
+        let engines: [(String, (String) async throws -> [ImageResult])] = [("DuckDuckGo Images", duckDuckGoImages), ("Wikimedia Commons", commonsImages)]
+        for (name, engine) in engines where !rests(name) {
+            do {
+                let rows = try await engine(query)
+                if !rows.isEmpty { return rows }
+                problems.append("\(name) found nothing")
+            } catch let failure as Failure {
+                if ["rate_limited", "provider_unavailable", "request_failed"].contains(failure.code) { rest(name) }
+                problems.append("\(name): \(failure.message)")
+            } catch {
+                problems.append("\(name): \(error.localizedDescription)")
+            }
+        }
+        throw Failure(code: "provider_unavailable", message: "Image search isn’t available right now (\(problems.joined(separator: "; "))).")
+    }
+
+    /// Mwmbl, the open, non-profit search engine, through its public API (no key).
+    private static func mwmbl(_ query: String) async throws -> [Result] {
+        var components = URLComponents(string: "https://api.mwmbl.org/search/")!
+        components.queryItems = [URLQueryItem(name: "s", value: query)]
+        var request = URLRequest(url: components.url!)
+        request.setValue("Nearloop/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") (local chat web search)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        try check(response, "Mwmbl")
+        let rows = (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+        func text(_ value: Any?) -> String { ((value as? [[String: Any]]) ?? []).compactMap { $0["value"] as? String }.joined() }
+        return rows.compactMap { row in
+            guard let url = row["url"] as? String else { return nil }
+            return Result(title: text(row["title"]), url: url, snippet: text(row["extract"]))
+        }
+    }
+
+    /// Wikipedia's own search API (no key): encyclopedic, but always there.
+    private static func wikipedia(_ query: String) async throws -> [Result] {
+        var components = URLComponents(string: "https://en.wikipedia.org/w/api.php")!
+        components.queryItems = [URLQueryItem(name: "action", value: "query"), URLQueryItem(name: "list", value: "search"),
+                                 URLQueryItem(name: "srsearch", value: query), URLQueryItem(name: "srlimit", value: String(resultCount)),
+                                 URLQueryItem(name: "format", value: "json")]
+        var request = URLRequest(url: components.url!)
+        request.setValue("Nearloop/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") (local chat web search)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        try check(response, "Wikipedia")
+        let rows = (((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["query"] as? [String: Any])?["search"] as? [[String: Any]]) ?? []
+        return rows.compactMap { row in
+            guard let title = row["title"] as? String else { return nil }
+            let path = title.replacingOccurrences(of: " ", with: "_").addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? title
+            return Result(title: title + " — Wikipedia", url: "https://en.wikipedia.org/wiki/\(path)", snippet: HTMLText.inline(row["snippet"] as? String ?? ""))
+        }
+    }
+
+    /// Wikimedia Commons' image search API (no key): freely licensed pictures with their pages.
+    private static func commonsImages(_ query: String) async throws -> [ImageResult] {
+        var components = URLComponents(string: "https://commons.wikimedia.org/w/api.php")!
+        components.queryItems = [URLQueryItem(name: "action", value: "query"), URLQueryItem(name: "generator", value: "search"),
+                                 URLQueryItem(name: "gsrsearch", value: query), URLQueryItem(name: "gsrnamespace", value: "6"),
+                                 URLQueryItem(name: "gsrlimit", value: "8"), URLQueryItem(name: "prop", value: "imageinfo"),
+                                 URLQueryItem(name: "iiprop", value: "url|size|mime"), URLQueryItem(name: "iiurlwidth", value: "400"),
+                                 URLQueryItem(name: "format", value: "json")]
+        var request = URLRequest(url: components.url!)
+        request.setValue("Nearloop/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") (local chat image search)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        try check(response, "Wikimedia Commons")
+        let pages = ((((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["query"] as? [String: Any])?["pages"] as? [String: Any]) ?? [:]).values
+        return pages.compactMap { value -> (Int, ImageResult)? in
+            guard let page = value as? [String: Any], let info = (page["imageinfo"] as? [[String: Any]])?.first,
+                  (info["mime"] as? String ?? "").hasPrefix("image/"), let image = info["url"] as? String else { return nil }
+            let title = (page["title"] as? String ?? "").replacingOccurrences(of: "File:", with: "")
+            let name = (title as NSString).deletingPathExtension
+            return (page["index"] as? Int ?? 0, ImageResult(title: name, image: image, thumbnail: info["thumburl"] as? String ?? image,
+                                                            page: info["descriptionurl"] as? String ?? image,
+                                                            width: info["width"] as? Int, height: info["height"] as? Int))
+        }.sorted { $0.0 < $1.0 }.map(\.1)
+    }
+
     /// DuckDuckGo's HTML results page, the no-JavaScript version, which needs no key.
     private static func duckDuckGo(_ query: String) async throws -> [Result] {
         var request = URLRequest(url: URL(string: "https://html.duckduckgo.com/html/")!)
@@ -168,8 +283,12 @@ enum WebSearch {
         form.queryItems = [URLQueryItem(name: "q", value: query)]
         request.httpBody = Data((form.percentEncodedQuery ?? "").replacingOccurrences(of: "+", with: "%2B").utf8)
         let (data, response) = try await session.data(for: request)
-        try check(response, "DuckDuckGo")
         let html = String(decoding: data, as: UTF8.self)
+        // DuckDuckGo throttles with 202 and a page asking to prove a person is searching.
+        if (response as? HTTPURLResponse)?.statusCode == 202 || html.contains("anomaly") {
+            throw Failure(code: "rate_limited", message: "DuckDuckGo is limiting searches from this connection")
+        }
+        try check(response, "DuckDuckGo")
         if html.range(of: "anomaly-modal", options: .caseInsensitive) != nil || html.contains("challenge-form") {
             throw Failure(code: "rate_limited", message: "DuckDuckGo asked to verify a person is searching. Try again later, or choose Brave Search or SearXNG in \(settingsHint).", needsUser: true)
         }
@@ -245,7 +364,7 @@ enum WebSearch {
         do {
             let rows: [ImageResult]
             switch provider {
-            case .duckduckgo: rows = try await duckDuckGoImages(trimmed)
+            case .duckduckgo: rows = try await keylessImages(trimmed)
             case .brave: rows = try await braveImages(trimmed)
             case .searxng: rows = try await searxngImages(trimmed)
             }

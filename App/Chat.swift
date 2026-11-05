@@ -123,7 +123,7 @@ final class ChatStore: ObservableObject {
 
     private var task: Task<Void, Never>?
     /// Tool rounds per reply; the last round offers no tools, so the model has to answer.
-    private let maxRounds = 8
+    private let maxRounds = 6
 
     private static var folder: URL { AppPaths.support.appendingPathComponent("Chats") }
 
@@ -259,12 +259,14 @@ final class ChatStore: ObservableObject {
                 self.append(ChatMessage(role: .assistant, error: error.localizedDescription), to: id)
                 return
             }
-            for round in 0..<self.maxRounds {
-                let tools = self.webSearch && round < self.maxRounds - 1
+            // Failed searches in a row: after two, the model answers with what it has instead of trying again.
+            var failures = 0, finishedRetry = false
+            for round in 0..<(self.maxRounds + 1) {
+                let tools = self.webSearch && round < self.maxRounds - 1 && failures < 2 && !finishedRetry
                 guard let messageID = self.append(ChatMessage(role: .assistant), to: id) else { return }
                 let calls: [ChatToolCall]
                 do {
-                    calls = try await self.stream(id, into: messageID, tools: tools)
+                    calls = try await self.stream(id, into: messageID, tools: tools, finishing: self.webSearch && !tools, searchFailed: failures >= 2)
                 } catch is CancellationError {
                     self.update(id, messageID) { if $0.text.isEmpty && $0.reasoning.isEmpty { $0.error = "Stopped." } }
                     return
@@ -275,10 +277,16 @@ final class ChatStore: ObservableObject {
                     self.update(id, messageID) { $0.error = error.localizedDescription }
                     return
                 }
+                // A last round that wrote no answer (only a call as text, now hidden) gets one more try.
+                if !tools, self.webSearch, !finishedRetry, let message = self.message(id, messageID), message.text.isEmpty, message.toolCalls.isEmpty {
+                    finishedRetry = true
+                    self.conversations[self.index(of: id)!].messages.removeAll { $0.id == messageID }
+                    continue
+                }
                 guard tools, !calls.isEmpty else { return }
                 for call in calls {
                     if Task.isCancelled { return }
-                    await self.run(call, in: id, from: messageID)
+                    if await self.run(call, in: id, from: messageID) { failures = 0 } else { failures += 1 }
                 }
             }
         }
@@ -296,6 +304,10 @@ final class ChatStore: ObservableObject {
         return message.id
     }
 
+    private func message(_ id: UUID, _ messageID: UUID) -> ChatMessage? {
+        conversations.first { $0.id == id }?.messages.first { $0.id == messageID }
+    }
+
     private func update(_ id: UUID, _ messageID: UUID, _ change: (inout ChatMessage) -> Void) {
         guard let index = index(of: id), let at = conversations[index].messages.firstIndex(where: { $0.id == messageID }) else { return }
         change(&conversations[index].messages[at])
@@ -303,7 +315,10 @@ final class ChatStore: ObservableObject {
 
     // MARK: Tools
 
-    private func run(_ call: ChatToolCall, in id: UUID, from messageID: UUID) async {
+    /// Runs one tool call; true when it worked.
+    @discardableResult
+    private func run(_ call: ChatToolCall, in id: UUID, from messageID: UUID) async -> Bool {
+        var worked = true
         let payload: String
         switch call.name {
         case "web_search":
@@ -315,6 +330,7 @@ final class ChatStore: ObservableObject {
                 step(id, messageID, call.id) { $0.results = results; $0.done = true }
             case .failure(let failure):
                 payload = WebSearch.payload(failure)
+                worked = false
                 step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
             }
         case "image_search":
@@ -326,6 +342,7 @@ final class ChatStore: ObservableObject {
                 step(id, messageID, call.id) { $0.images = images; $0.done = true }
             case .failure(let failure):
                 payload = WebSearch.payload(failure)
+                worked = false
                 step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
             }
         case "fetch_url":
@@ -337,6 +354,7 @@ final class ChatStore: ObservableObject {
                 step(id, messageID, call.id) { $0.done = true }
             case .failure(let failure):
                 payload = WebSearch.payload(failure)
+                worked = false
                 step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
             }
         default:
@@ -347,6 +365,7 @@ final class ChatStore: ObservableObject {
         result.toolCallID = call.id
         append(result, to: id)
         save(id)
+        return worked
     }
 
     private func step(_ id: UUID, _ messageID: UUID, _ callID: String, _ change: (inout ChatStep) -> Void) {
@@ -357,7 +376,8 @@ final class ChatStore: ObservableObject {
 
     // MARK: Streaming
 
-    private func systemPrompt(tools: Bool) -> String {
+    /// `finishing`: Search is on but this round offers no tools (the last round, or searching kept failing).
+    private func systemPrompt(tools: Bool, finishing: Bool = false, searchFailed: Bool = false) -> String {
         let now = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year().hour().minute())
         var prompt = "You are a helpful assistant running privately on the user’s Mac in Nearloop. It is \(now) (\(TimeZone.current.identifier)). Format answers in Markdown."
         if tools {
@@ -371,17 +391,22 @@ final class ChatStore: ObservableObject {
 
             If a tool reports an error, tell the user what happened.
             """
+        } else if finishing {
+            prompt += searchFailed
+                ? " Web search isn’t working right now (the searches above failed). Don’t try to search or call any tool: answer now from what you know and what any earlier results showed, and say clearly that you couldn’t check the web, so recent details may be out of date."
+                : " You’ve searched enough: don’t search or call any tool again. Answer now with what you found, citing it, and say what you couldn’t confirm."
         } else {
             prompt += " You can’t search the web right now. When a question depends on recent facts, say that your information may be out of date and that turning on Search would let you check."
         }
         return prompt
     }
 
-    private func requestMessages(_ conversation: Conversation, tools: Bool, thinks: Bool) -> [[String: Any]] {
+    private func requestMessages(_ conversation: Conversation, tools: Bool, thinks: Bool, finishing: Bool = false, searchFailed: Bool = false) -> [[String: Any]] {
+        if finishing { return answerMessages(conversation, thinks: thinks, searchFailed: searchFailed) }
         // A reply stopped between two tool calls has calls without results; the API needs each call answered,
         // so only the answered ones are sent.
         let answered = Set(conversation.messages.compactMap { $0.role == .tool ? $0.toolCallID : nil })
-        var system = systemPrompt(tools: tools)
+        var system = systemPrompt(tools: tools, finishing: finishing, searchFailed: searchFailed)
         if thinks, let guidance = thinking.guidance { system += "\n\n" + guidance }
         var messages: [[String: Any]] = [["role": "system", "content": system]]
         for message in conversation.messages {
@@ -414,7 +439,7 @@ final class ChatStore: ObservableObject {
     }
 
     /// Streams one response from Kapitsa into the message; returns the tool calls it asked for.
-    private func stream(_ id: UUID, into messageID: UUID, tools: Bool) async throws -> [ChatToolCall] {
+    private func stream(_ id: UUID, into messageID: UUID, tools: Bool, finishing: Bool = false, searchFailed: Bool = false) async throws -> [ChatToolCall] {
         guard let conversation = conversations.first(where: { $0.id == id }) else { return [] }
         let thinks = thinking.thinks(about: conversation.messages.last { $0.role == .user })
         let server = ServerController.shared
@@ -425,13 +450,14 @@ final class ChatStore: ObservableObject {
         if !server.apiKey.isEmpty { request.setValue("Bearer \(server.apiKey)", forHTTPHeaderField: "Authorization") }
         var body: [String: Any] = [
             "model": server.record?.apiId ?? "local",
-            "messages": requestMessages(conversation, tools: tools, thinks: thinks),
+            "messages": requestMessages(conversation, tools: tools, thinks: thinks, finishing: finishing, searchFailed: searchFailed),
             "stream": true,
             "stream_options": ["include_usage": true],
             "chat_template_kwargs": ["enable_thinking": thinks],
         ]
         if thinks, let effort = thinking.effort { body["reasoning_effort"] = effort }
         if tools { body["tools"] = WebSearch.tools }
+        // The last round sends no tools: its request has no tool traffic left in it (see answerMessages).
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -452,7 +478,7 @@ final class ChatStore: ObservableObject {
         func push(final: Bool) {
             guard final || Date().timeIntervalSince(lastPush) > 0.06 else { return }
             lastPush = Date()
-            let (t, r) = (text, reasoning)
+            let (t, r) = (Self.withoutWrittenToolCalls(text), reasoning)
             update(id, messageID) { $0.text = t; $0.reasoning = r }
             // Every few seconds to disk, so a reply cut off by quitting or a crash keeps what was written.
             if Date().timeIntervalSince(lastSave) > 3 { lastSave = Date(); save(id) }
@@ -498,6 +524,10 @@ final class ChatStore: ObservableObject {
         let ended = Date()
         update(id, messageID) { message in
             message.toolCalls = ordered
+            if ordered.isEmpty && message.text.isEmpty && message.error == nil {
+                message.error = searchFailed ? "Web search isn’t working right now and the model didn’t write an answer. Try again, or turn Search off."
+                                             : "The model didn’t write an answer. Try again."
+            }
             if !message.reasoning.isEmpty { message.thinkingSeconds = (firstText ?? ended).timeIntervalSince(started) }
             if let outputTokens, outputTokens > 1 {
                 message.outputTokens = outputTokens
@@ -507,6 +537,71 @@ final class ChatStore: ObservableObject {
             }
         }
         return ordered
+    }
+
+    /// The final answer's request: the conversation in plain questions and answers, and this turn's tool
+    /// results handed over as text with the question. After rounds of tool use a model tends to keep
+    /// writing tool calls (Clover wrote one even with tool_choice "none"); with no tool markup left in what
+    /// it reads, it answers.
+    private func answerMessages(_ conversation: Conversation, thinks: Bool, searchFailed: Bool) -> [[String: Any]] {
+        var system = "You are a helpful assistant running privately on the user’s Mac in Nearloop. It is \(Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year().hour().minute())) (\(TimeZone.current.identifier)). Format answers in Markdown."
+        if thinks, let guidance = thinking.guidance { system += "\n\n" + guidance }
+        var messages: [[String: Any]] = [["role": "system", "content": system]]
+        let lastUser = conversation.messages.lastIndex { $0.role == .user } ?? conversation.messages.count
+        // Earlier turns: what the user asked and what was answered, without the tool traffic.
+        for message in conversation.messages[..<lastUser] {
+            if message.role == .user {
+                messages.append(["role": "user", "content": message.text.isEmpty ? "(an image)" : message.text])
+            } else if message.role == .assistant, message.toolCalls.isEmpty, !message.text.isEmpty {
+                messages.append(["role": "assistant", "content": message.text])
+            }
+        }
+        // This turn's findings, from the tools' payloads.
+        var lines: [String] = [], images: [String] = [], pageBudget = 24_000
+        for message in conversation.messages[lastUser...] where message.role == .tool {
+            guard let payload = try? JSONSerialization.jsonObject(with: Data(message.text.utf8)) as? [String: Any], payload["ok"] as? Bool == true else { continue }
+            for result in (payload["results"] as? [[String: Any]]) ?? [] {
+                lines.append("- \(result["title"] as? String ?? "") (\(result["url"] as? String ?? "")): \(result["snippet"] as? String ?? "")")
+            }
+            if let content = payload["content"] as? String, let url = payload["url"] as? String, pageBudget > 0 {
+                let excerpt = String(content.prefix(min(6_000, pageBudget)))
+                pageBudget -= excerpt.count
+                lines.append("\nPage \(url):\n\(excerpt)")
+            }
+            for image in ((payload["images"] as? [[String: Any]]) ?? []).prefix(6) {
+                images.append("- \(image["title"] as? String ?? "") — image_url: \(image["image_url"] as? String ?? "") (page: \(image["page_url"] as? String ?? ""))")
+            }
+        }
+        let question = conversation.messages.indices.contains(lastUser) ? conversation.messages[lastUser] : nil
+        var ask = question?.text ?? ""
+        if lines.isEmpty && images.isEmpty {
+            ask += searchFailed
+                ? "\n\n(Web search wasn’t working just now, so nothing could be checked online. Answer from what you know, and say clearly that recent details may be out of date.)"
+                : "\n\n(Answer from what you know, and say what you couldn’t check online.)"
+        } else {
+            ask += "\n\nHere is what web searches and the pages read returned:\n\n" + lines.joined(separator: "\n")
+            if !images.isEmpty { ask += "\n\nPictures found:\n" + images.joined(separator: "\n") }
+            ask += "\n\nUsing this, answer the question above now. Cite each fact right after it with a Markdown link to its page, using only the URLs above. Don’t add a separate list of sources at the end. "
+            if !images.isEmpty { ask += "If pictures help, include up to four as Markdown images: ![short description](image_url), with image_url exactly as listed. " }
+            ask += "Say what these sources didn’t settle."
+        }
+        if let question, !question.images.isEmpty {
+            var parts: [[String: Any]] = question.images.map { ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\($0.base64EncodedString())"]] }
+            parts.append(["type": "text", "text": ask])
+            messages.append(["role": "user", "content": parts])
+        } else {
+            messages.append(["role": "user", "content": ask])
+        }
+        return messages
+    }
+
+    /// A model offered no tools sometimes writes a tool call as text (<tool_call>…</tool_call>, finished or
+    /// not); that is never shown as an answer.
+    nonisolated static func withoutWrittenToolCalls(_ text: String) -> String {
+        guard text.contains("<tool_call") || text.contains("<function=") else { return text }
+        return text.replacingOccurrences(of: #"(?s)<tool_call>.*?(</tool_call>|$)"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"(?s)<function=[^>]*>.*?(</function>|$)"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Sources
