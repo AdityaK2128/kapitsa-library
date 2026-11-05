@@ -13,11 +13,13 @@ struct ChatToolCall: Codable, Hashable {
 
 /// What one tool call did, shown under the reply that made it.
 struct ChatStep: Codable, Hashable {
-    enum Kind: String, Codable { case search, read, other }
+    enum Kind: String, Codable { case search, read, images, other }
     let callID: String
     let kind: Kind
     let subject: String
     var results: [WebSearch.Result] = []
+    /// Optional, so chats saved before image search still load.
+    var images: [WebSearch.ImageResult]?
     var error: String?
     var done = false
 }
@@ -239,6 +241,17 @@ final class ChatStore: ObservableObject {
                 payload = WebSearch.payload(failure)
                 step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
             }
+        case "image_search":
+            let query = call.argument("query") ?? ""
+            update(id, messageID) { $0.steps.append(ChatStep(callID: call.id, kind: .images, subject: query)) }
+            switch await WebSearch.images(query) {
+            case .success(let images):
+                payload = WebSearch.payload(images)
+                step(id, messageID, call.id) { $0.images = images; $0.done = true }
+            case .failure(let failure):
+                payload = WebSearch.payload(failure)
+                step(id, messageID, call.id) { $0.error = failure.message; $0.done = true }
+            }
         case "fetch_url":
             let address = call.argument("url") ?? ""
             update(id, messageID) { $0.steps.append(ChatStep(callID: call.id, kind: .read, subject: address)) }
@@ -271,7 +284,18 @@ final class ChatStore: ObservableObject {
         let now = Date().formatted(.dateTime.weekday(.wide).day().month(.wide).year().hour().minute())
         var prompt = "You are a helpful assistant running privately on the user’s Mac in Nearloop. It is \(now) (\(TimeZone.current.identifier)). Format answers in Markdown."
         if tools {
-            prompt += " You can search the web with web_search and read a page with fetch_url. Use them when a question needs current, specific or verifiable information; otherwise answer directly. Search with short keyword queries and read a page when the snippets aren’t enough. When you use information from the web, cite it inline as a Markdown link to the page, like [Reuters](https://www.reuters.com/…). If a tool reports an error, tell the user what happened."
+            prompt += """
+
+            Web search is on. What you learned in training is out of date, and the world has changed since: news, versions, prices, people’s jobs, results, laws, products and figures may all be different now. So for any question that involves facts, search with web_search before you answer, even when you think you know; never present facts from memory as current. Answer without searching only when no facts are involved, such as writing, rewriting, math, or code the user gave you. Search with short keyword queries, search again if the results don’t settle it, and read the most relevant pages with fetch_url when snippets aren’t enough. If sources disagree, say so and prefer the most recent.
+
+            Support every factual claim with its source: right after the claim, put a Markdown link to the page it came from, like ([Reuters](https://www.reuters.com/…)). Cite only URLs that came from your tool results, never invent one. Don’t add a separate list of sources at the end; Nearloop shows them under your answer.
+
+            When a picture would help, such as what something looks like, a place, a product or a diagram, use image_search and put up to four of the most relevant images in your answer as Markdown images: ![short description](image_url), using image_url values exactly as image_search returned them.
+
+            If a tool reports an error, tell the user what happened.
+            """
+        } else {
+            prompt += " You can’t search the web right now. When a question depends on recent facts, say that your information may be out of date and that turning on Search would let you check."
         }
         return prompt
     }
@@ -396,6 +420,29 @@ final class ChatStore: ObservableObject {
             }
         }
         return ordered
+    }
+
+    // MARK: Sources
+
+    /// The pages behind a final answer, from the searches and reads that led to it (since the user's
+    /// message): the ones the answer links to first, then pages read, then the top search results.
+    static func sources(for message: ChatMessage, in conversation: Conversation) -> [WebSearch.Result] {
+        guard message.role == .assistant, message.toolCalls.isEmpty, let end = conversation.messages.firstIndex(where: { $0.id == message.id }) else { return [] }
+        let start = (conversation.messages[..<end].lastIndex { $0.role == .user } ?? -1) + 1
+        let steps = conversation.messages[start...end].flatMap(\.steps)
+        guard !steps.isEmpty else { return [] }
+        let found = steps.flatMap(\.results)
+        let read = steps.filter { $0.kind == .read && $0.error == nil }.map { step in
+            found.first { $0.url == step.subject } ?? WebSearch.Result(title: URL(string: step.subject)?.host ?? step.subject, url: step.subject, snippet: "")
+        }
+        func key(_ url: String) -> String { url.lowercased().replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "").replacingOccurrences(of: "www.", with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        let text = message.text.lowercased()
+        let cited = (read + found).filter { text.contains(key($0.url)) }
+        var picked: [WebSearch.Result] = []
+        for result in cited + read + found.prefix(3) where !picked.contains(where: { key($0.url) == key(result.url) }) {
+            picked.append(result)
+        }
+        return Array(picked.prefix(8))
     }
 
     // MARK: Images

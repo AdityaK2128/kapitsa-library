@@ -218,7 +218,8 @@ private struct ChatThread: View {
                             UserBubble(message: message)
                         } else {
                             AssistantReply(message: message, live: writing && message.id == shown.last?.id,
-                                           isLast: !writing && message.id == lastAssistant, chat: chat, conversationID: conversation.id)
+                                           isLast: !writing && message.id == lastAssistant, chat: chat, conversationID: conversation.id,
+                                           sources: ChatStore.sources(for: message, in: conversation))
                         }
                     }
                     // A question left without an answer, say because the model stopped or the app quit while it wrote.
@@ -301,6 +302,8 @@ struct AssistantReply: View {
     let isLast: Bool
     @ObservedObject var chat: ChatStore
     var conversationID: UUID?
+    /// The pages behind this answer, shown under it.
+    var sources: [WebSearch.Result] = []
     @State private var showThinking = false
 
     var body: some View {
@@ -326,6 +329,9 @@ struct AssistantReply: View {
                 Label(error, systemImage: error == "Stopped." ? "stop.circle" : "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(error == "Stopped." ? Color.secondary : Color.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if !live && !sources.isEmpty && !message.text.isEmpty {
+                SourcesRow(sources: sources)
             }
             if !live && message.toolCalls.isEmpty && (!message.text.isEmpty || message.error != nil) {
                 footer
@@ -363,15 +369,15 @@ private struct StepRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button { if !step.results.isEmpty { withAnimation(.snappy) { expanded.toggle() } } } label: {
+            Button { if !step.results.isEmpty || !(step.images ?? []).isEmpty { withAnimation(.snappy) { expanded.toggle() } } } label: {
                 HStack(spacing: 7) {
                     if !step.done { ProgressView().controlSize(.mini) } else {
-                        Image(systemName: step.error != nil ? "exclamationmark.triangle" : step.kind == .read ? "doc.text" : "magnifyingglass")
+                        Image(systemName: step.error != nil ? "exclamationmark.triangle" : step.kind == .read ? "doc.text" : step.kind == .images ? "photo.on.rectangle" : "magnifyingglass")
                             .foregroundStyle(step.error != nil ? Color.orange : Color.secondary)
                     }
                     Text(title).lineLimit(1).truncationMode(.middle)
-                    if !step.results.isEmpty {
-                        Text("\(step.results.count) results").foregroundStyle(.tertiary)
+                    if !step.results.isEmpty || !(step.images ?? []).isEmpty {
+                        Text(step.kind == .images ? "\(step.images?.count ?? 0) images" : "\(step.results.count) results").foregroundStyle(.tertiary)
                         Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
@@ -382,7 +388,17 @@ private struct StepRow: View {
             if let error = step.error {
                 Text(error).font(.caption).foregroundStyle(.secondary).padding(.leading, 10).fixedSize(horizontal: false, vertical: true)
             }
-            if expanded {
+            if expanded, let images = step.images, !images.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(images, id: \.image) { image in
+                            RemoteImage(address: image.thumbnail, link: image.page, help: "\(image.title) — \(image.host)")
+                                .frame(width: 120, height: 86).clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }.padding(.leading, 12)
+            }
+            if expanded && !step.results.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(step.results, id: \.url) { result in
                         VStack(alignment: .leading, spacing: 1) {
@@ -401,8 +417,100 @@ private struct StepRow: View {
         switch step.kind {
         case .search: return (step.done ? "Searched " : "Searching ") + "“\(step.subject)”"
         case .read: return (step.done ? "Read " : "Reading ") + (URL(string: step.subject)?.host?.replacingOccurrences(of: "www.", with: "") ?? step.subject)
+        case .images: return (step.done ? "Found images of " : "Finding images of ") + "“\(step.subject)”"
         case .other: return step.subject
         }
+    }
+}
+
+/// The pages an answer is based on, numbered, under the answer.
+private struct SourcesRow: View {
+    let sources: [WebSearch.Result]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Sources").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            FlowLayout(spacing: 6) {
+                ForEach(Array(sources.enumerated()), id: \.element.url) { index, source in
+                    if let url = URL(string: source.url) {
+                        Link(destination: url) {
+                            HStack(spacing: 5) {
+                                Text("\(index + 1)").font(.caption2.weight(.semibold)).monospacedDigit()
+                                    .frame(minWidth: 14).padding(.vertical, 1)
+                                    .background(Circle().fill(Color.primary.opacity(0.1)))
+                                Text(source.host).font(.caption).lineLimit(1)
+                            }
+                            .padding(.leading, 4).padding(.trailing, 9).padding(.vertical, 4)
+                            .background(Capsule().fill(Color.primary.opacity(0.05)))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help(source.title + "\n" + source.url)
+                    }
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+}
+
+/// Lays children out in rows, wrapping to the next row when one is full.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0, widest: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width { y += row + spacing; x = 0; row = 0 }
+            x += size.width + spacing
+            row = max(row, size.height)
+            widest = max(widest, x - spacing)
+        }
+        return CGSize(width: proposal.width ?? widest, height: y + row)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, row: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX && x + size.width > bounds.maxX { y += row + spacing; x = bounds.minX; row = 0 }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            row = max(row, size.height)
+        }
+    }
+}
+
+/// A picture from the web, loaded only from public addresses; clicking it opens its page.
+struct RemoteImage: View {
+    let address: String
+    var link: String?
+    var help = ""
+    var fit = false
+
+    var body: some View {
+        if WebSearch.loadable(address), let url = URL(string: address) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    if fit { image.resizable().scaledToFit() } else { image.resizable().scaledToFill() }
+                case .failure:
+                    placeholder(Image(systemName: "photo.badge.exclamationmark"))
+                default:
+                    placeholder(ProgressView().controlSize(.small))
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { if let link, let page = URL(string: link) { NSWorkspace.shared.open(page) } }
+            .help(help)
+        } else {
+            placeholder(Image(systemName: "photo"))
+        }
+    }
+
+    private func placeholder(_ content: some View) -> some View {
+        ZStack { Color.primary.opacity(0.05); content.foregroundStyle(.tertiary) }
     }
 }
 
@@ -519,6 +627,28 @@ private struct Composer: View {
 
 // MARK: - Markdown
 
+/// A Markdown image: ![alt](url).
+struct MarkdownImage: Hashable {
+    let alt: String
+    let url: String
+
+    private static let pattern = try! NSRegularExpression(pattern: #"!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)"#)
+
+    /// The line without its images, and the images it had.
+    nonisolated static func extract(_ line: String) -> (String, [MarkdownImage]) {
+        guard line.contains("![") else { return (line, []) }
+        let range = NSRange(line.startIndex..., in: line)
+        let matches = pattern.matches(in: line, range: range)
+        guard !matches.isEmpty else { return (line, []) }
+        let images = matches.compactMap { match -> MarkdownImage? in
+            guard let alt = Range(match.range(at: 1), in: line), let url = Range(match.range(at: 2), in: line) else { return nil }
+            return MarkdownImage(alt: String(line[alt]), url: String(line[url]))
+        }
+        let rest = pattern.stringByReplacingMatches(in: line, range: range, withTemplate: "").trimmingCharacters(in: .whitespaces)
+        return (rest, images)
+    }
+}
+
 /// Renders the Markdown models write: headings, paragraphs, lists, quotes, tables and code blocks, with
 /// inline bold, italics, code and links.
 struct MarkdownText: View {
@@ -531,6 +661,7 @@ struct MarkdownText: View {
         case quote(String)
         case code(String, language: String)
         case table([[String]])
+        case images([MarkdownImage])
         case rule
     }
 
@@ -576,6 +707,19 @@ struct MarkdownText: View {
             }
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
+        case .images(let images):
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(images, id: \.url) { image in
+                    VStack(alignment: .leading, spacing: 4) {
+                        RemoteImage(address: image.url, link: image.url, help: image.alt, fit: true)
+                            .frame(maxWidth: images.count == 1 ? 520 : 260, maxHeight: images.count == 1 ? 340 : 200)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        if !image.alt.isEmpty {
+                            Text(image.alt).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                }
+            }
         case .rule:
             Divider()
         }
@@ -610,6 +754,14 @@ struct MarkdownText: View {
             }
             if code != nil { code?.append(raw); continue }
             if line.isEmpty { flush(); continue }
+            // Images: on a line of their own they become a row of pictures; inside text they follow it.
+            let (rest, pictures) = MarkdownImage.extract(line)
+            if !pictures.isEmpty {
+                if !rest.isEmpty { paragraph.append(rest) }
+                flush()
+                blocks.append(.images(Array(pictures.prefix(4))))
+                continue
+            }
             if line.hasPrefix("|") {
                 if !paragraph.isEmpty { flush() }
                 let cells = line.trimmingCharacters(in: CharacterSet(charactersIn: "|")).components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }

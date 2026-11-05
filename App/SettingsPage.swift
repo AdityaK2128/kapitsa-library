@@ -11,7 +11,7 @@ struct SettingsPage: View {
             switch self {
             case .general: return "General"
             case .shortcut: return "Quick Chat"
-            case .chat: return "Chat & Web Search"
+            case .chat: return "Web Search"
             case .server: return "Server"
             case .memory: return "Memory"
             case .storage: return "Storage"
@@ -22,7 +22,7 @@ struct SettingsPage: View {
             switch self {
             case .general: return "gearshape"
             case .shortcut: return "command"
-            case .chat: return "bubble.left.and.bubble.right"
+            case .chat: return "globe"
             case .server: return "server.rack"
             case .memory: return "memorychip"
             case .storage: return "externaldrive"
@@ -34,24 +34,31 @@ struct SettingsPage: View {
     @AppStorage("settingsCategory") private var category = Category.general.rawValue
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Settings").font(.system(size: 22, weight: .bold)).padding(.horizontal, 10).padding(.bottom, 12)
-                ForEach(Category.allCases) { item in
-                    Button { category = item.rawValue } label: {
-                        Label(item.title, systemImage: item.symbol)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(RoundedRectangle(cornerRadius: 7).fill(category == item.rawValue ? Color.accentColor.opacity(0.18) : .clear))
-                            .contentShape(Rectangle())
-                    }.buttonStyle(.plain)
+        // One title and a row of tabs, like Discover: the app's sidebar is the only sidebar.
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Settings").font(.system(size: 28, weight: .bold))
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Category.allCases) { item in
+                            let selected = category == item.rawValue
+                            Button { category = item.rawValue } label: {
+                                Label(item.title, systemImage: item.symbol)
+                                    .font(.callout.weight(selected ? .semibold : .regular))
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(Capsule().fill(selected ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.05)))
+                                    .foregroundStyle(selected ? Color.primary : Color.secondary)
+                                    .contentShape(Capsule())
+                            }.buttonStyle(.plain)
+                        }
+                    }
                 }
-                Spacer()
             }
-            .padding(.horizontal, 12).padding(.top, 26)
-            .frame(width: 220)
-            .background(Color.primary.opacity(0.025))
-            Divider()
+            // Lined up with the forms' rows, which sit 20 points inside their own width.
+            .padding(.horizontal, 20)
+            .frame(maxWidth: 720, alignment: .leading)
+            .padding(.top, 28).padding(.bottom, 4)
+            .frame(maxWidth: .infinity)
             Group {
                 switch Category(rawValue: category) ?? .general {
                 case .general: GeneralSettings()
@@ -66,7 +73,7 @@ struct SettingsPage: View {
             // The forms blend into the page instead of drawing their own background under the title bar.
             .scrollContentBackground(.hidden)
             .modifier(NoTopScrollEdge())
-            .frame(maxWidth: 680)
+            .frame(maxWidth: 720)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }

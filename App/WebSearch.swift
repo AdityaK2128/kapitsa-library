@@ -26,6 +26,17 @@ enum WebSearch {
         var host: String { URL(string: url)?.host?.replacingOccurrences(of: "www.", with: "") ?? url }
     }
 
+    /// A picture found by image_search: the image itself, a small preview, and the page it comes from.
+    struct ImageResult: Codable, Hashable {
+        let title: String
+        let image: String
+        let thumbnail: String
+        let page: String
+        var width: Int?
+        var height: Int?
+        var host: String { URL(string: page)?.host?.replacingOccurrences(of: "www.", with: "") ?? page }
+    }
+
     struct Failure: Error {
         let code: String
         let message: String
@@ -59,6 +70,11 @@ enum WebSearch {
             "parameters": ["type": "object", "properties": ["query": ["type": "string", "description": "What to search for"]], "required": ["query"]],
         ]],
         ["type": "function", "function": [
+            "name": "image_search",
+            "description": "Find pictures on the web. Returns image URLs with the page each comes from. Use it when seeing something helps: what a thing, place, person or product looks like, or a diagram.",
+            "parameters": ["type": "object", "properties": ["query": ["type": "string", "description": "What to find pictures of"]], "required": ["query"]],
+        ]],
+        ["type": "function", "function": [
             "name": "fetch_url",
             "description": "Read a public web page as text, for details a search snippet doesn't give.",
             "parameters": ["type": "object", "properties": ["url": ["type": "string", "description": "An http or https URL"]], "required": ["url"]],
@@ -71,6 +87,10 @@ enum WebSearch {
 
     static func payload(_ results: [Result]) -> String {
         json(["ok": true, "provider": provider.title, "results": results.map { ["title": $0.title, "url": $0.url, "snippet": $0.snippet] }])
+    }
+
+    static func payload(_ images: [ImageResult]) -> String {
+        json(["ok": true, "provider": provider.title, "images": images.map { ["title": $0.title, "image_url": $0.image, "page_url": $0.page] }])
     }
 
     static func payload(_ page: Page) -> String {
@@ -211,6 +231,111 @@ enum WebSearch {
         return ((object["results"] as? [[String: Any]]) ?? []).map {
             Result(title: $0["title"] as? String ?? "", url: $0["url"] as? String ?? "", snippet: $0["content"] as? String ?? "")
         }
+    }
+
+    // MARK: Images
+
+    static func images(_ query: String) async -> Swift.Result<[ImageResult], Failure> {
+        let trimmed = String(query.trimmingCharacters(in: .whitespacesAndNewlines).prefix(maxQuery))
+        guard !trimmed.isEmpty else { return .failure(Failure(code: "invalid_arguments", message: "image_search needs a non-empty query.")) }
+        do {
+            let rows: [ImageResult]
+            switch provider {
+            case .duckduckgo: rows = try await duckDuckGoImages(trimmed)
+            case .brave: rows = try await braveImages(trimmed)
+            case .searxng: rows = try await searxngImages(trimmed)
+            }
+            var results: [ImageResult] = []
+            for row in rows where sanitize(title: row.title, url: row.image, snippet: "") != nil && !results.contains(where: { $0.image == row.image }) {
+                let thumbnail = sanitize(title: "", url: row.thumbnail, snippet: "") != nil ? row.thumbnail : row.image
+                results.append(ImageResult(title: String(HTMLText.inline(row.title).prefix(maxTitle)), image: row.image, thumbnail: thumbnail,
+                                           page: sanitize(title: "", url: row.page, snippet: "") != nil ? row.page : row.image,
+                                           width: row.width, height: row.height))
+                if results.count >= 8 { break }
+            }
+            return .success(results)
+        } catch let failure as Failure {
+            return .failure(failure)
+        } catch {
+            return .failure(Failure(code: "request_failed", message: "The image search failed: \(error.localizedDescription)"))
+        }
+    }
+
+    private static let browser = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+
+    /// DuckDuckGo's image results: a token from the results page, then its JSON list.
+    private static func duckDuckGoImages(_ query: String) async throws -> [ImageResult] {
+        var page = URLComponents(string: "https://duckduckgo.com/")!
+        page.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "iax", value: "images"), URLQueryItem(name: "ia", value: "images")]
+        var first = URLRequest(url: page.url!)
+        first.setValue(browser, forHTTPHeaderField: "User-Agent")
+        let (html, response) = try await session.data(for: first)
+        try check(response, "DuckDuckGo")
+        let text = String(decoding: html, as: UTF8.self)
+        guard let range = text.range(of: #"vqd=["']?[0-9-]+"#, options: .regularExpression),
+              let token = text[range].split(whereSeparator: { $0 == "=" || $0 == "\"" || $0 == "'" }).last else {
+            throw Failure(code: "provider_unavailable", message: "DuckDuckGo’s image search didn’t answer as expected. Try again, or choose Brave Search or SearXNG in \(settingsHint).")
+        }
+        var list = URLComponents(string: "https://duckduckgo.com/i.js")!
+        list.queryItems = [URLQueryItem(name: "l", value: "us-en"), URLQueryItem(name: "o", value: "json"), URLQueryItem(name: "q", value: query),
+                           URLQueryItem(name: "vqd", value: String(token)), URLQueryItem(name: "f", value: ",,,,,"), URLQueryItem(name: "p", value: "1")]
+        var second = URLRequest(url: list.url!)
+        second.setValue(browser, forHTTPHeaderField: "User-Agent")
+        second.setValue("https://duckduckgo.com/", forHTTPHeaderField: "Referer")
+        let (data, listResponse) = try await session.data(for: second)
+        try check(listResponse, "DuckDuckGo")
+        let rows = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["results"] as? [[String: Any]]) ?? []
+        return rows.map {
+            ImageResult(title: $0["title"] as? String ?? "", image: $0["image"] as? String ?? "", thumbnail: $0["thumbnail"] as? String ?? "",
+                        page: $0["url"] as? String ?? "", width: $0["width"] as? Int, height: $0["height"] as? Int)
+        }
+    }
+
+    private static func braveImages(_ query: String) async throws -> [ImageResult] {
+        guard let key = Keychain.read("braveSearchKey"), !key.isEmpty else {
+            throw Failure(code: "missing_api_key", message: "No Brave Search API key is set. Add one in \(settingsHint).", needsUser: true)
+        }
+        var components = URLComponents(string: "https://api.search.brave.com/res/v1/images/search")!
+        components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "count", value: "10")]
+        var request = URLRequest(url: components.url!)
+        request.setValue(key, forHTTPHeaderField: "X-Subscription-Token")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        try check(response, "Brave Search")
+        let rows = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["results"] as? [[String: Any]]) ?? []
+        return rows.map {
+            ImageResult(title: $0["title"] as? String ?? "", image: ($0["properties"] as? [String: Any])?["url"] as? String ?? "",
+                        thumbnail: ($0["thumbnail"] as? [String: Any])?["src"] as? String ?? "", page: $0["url"] as? String ?? "")
+        }
+    }
+
+    private static func searxngImages(_ query: String) async throws -> [ImageResult] {
+        let base = searxngURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !base.isEmpty, var components = URLComponents(string: base + "/search") else {
+            throw Failure(code: "missing_api_key", message: "No SearXNG address is set. Add one in \(settingsHint).", needsUser: true)
+        }
+        components.queryItems = [URLQueryItem(name: "q", value: query), URLQueryItem(name: "format", value: "json"), URLQueryItem(name: "categories", value: "images")]
+        guard let url = components.url else { throw Failure(code: "invalid_arguments", message: "The SearXNG address isn’t valid.", needsUser: true) }
+        let (data, response) = try await session.data(for: URLRequest(url: url))
+        try check(response, "SearXNG")
+        let rows = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["results"] as? [[String: Any]]) ?? []
+        return rows.map {
+            ImageResult(title: $0["title"] as? String ?? "", image: $0["img_src"] as? String ?? "",
+                        thumbnail: $0["thumbnail_src"] as? String ?? "", page: $0["url"] as? String ?? "")
+        }
+    }
+
+    /// Whether the app may load a picture from this address: http(s), and not this Mac or a private
+    /// network given as a name or a literal address (a model could otherwise point it at local services).
+    static func loadable(_ address: String) -> Bool {
+        guard let url = URL(string: address), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host?.lowercased(), !host.isEmpty else { return false }
+        if host == "localhost" || host.hasSuffix(".localhost") || host.hasSuffix(".local") || host.hasSuffix(".internal") { return false }
+        var v4 = in_addr(), v6 = in6_addr()
+        if inet_pton(AF_INET, host, &v4) == 1 { return isPublic(withUnsafeBytes(of: &v4) { Array($0) }) }
+        let bare = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if inet_pton(AF_INET6, bare, &v6) == 1 { return isPublic(withUnsafeBytes(of: &v6) { Array($0) }) }
+        return true
     }
 
     // MARK: Reading a page

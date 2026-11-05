@@ -327,7 +327,8 @@ struct QuickChatView: View {
                             UserBubble(message: message)
                         } else {
                             AssistantReply(message: message, live: writing && message.id == shown.last?.id,
-                                           isLast: !writing && message.id == shown.last?.id, chat: chat, conversationID: conversation.id)
+                                           isLast: !writing && message.id == shown.last?.id, chat: chat, conversationID: conversation.id,
+                                           sources: ChatStore.sources(for: message, in: conversation))
                         }
                     }
                     if let launching = store.launching, writing {
