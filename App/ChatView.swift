@@ -4,53 +4,121 @@ import UniformTypeIdentifiers
 
 struct ChatView: View {
     @ObservedObject var chat = ChatStore.shared
+    @AppStorage("chatHistoryShown") private var historyShown = true
+    @State private var historyPopover = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            ConversationList(chat: chat).frame(width: 230)
-            Divider()
-            ChatThread(chat: chat)
+        GeometryReader { proxy in
+            // Room for the history column only when the conversation keeps a comfortable width beside it.
+            let docked = proxy.size.width >= 820
+            HStack(spacing: 0) {
+                if docked && historyShown {
+                    ChatHistory(chat: chat).frame(width: 250)
+                        .background(Color.primary.opacity(0.025))
+                    Divider()
+                }
+                VStack(spacing: 0) {
+                    ChatHeader(chat: chat) {
+                        if docked { withAnimation(.snappy) { historyShown.toggle() } } else { historyPopover.toggle() }
+                    }
+                    .popover(isPresented: $historyPopover, arrowEdge: .bottom) {
+                        ChatHistory(chat: chat) { historyPopover = false }.frame(width: 300, height: 460)
+                    }
+                    Divider().opacity(0.6)
+                    ChatThread(chat: chat)
+                }
+            }
         }
     }
 }
 
-// MARK: - Conversations
+// MARK: - Header and history
 
-private struct ConversationList: View {
+private struct ChatHeader: View {
     @ObservedObject var chat: ChatStore
-    @State private var renaming: Conversation?
-    @State private var newTitle = ""
+    @ObservedObject var server = ServerController.shared
+    let toggleHistory: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            Button { chat.newChat() } label: {
-                Label("New Chat", systemImage: "square.and.pencil").frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 12) {
+            Button(action: toggleHistory) { Image(systemName: "sidebar.left") }
+                .buttonStyle(.borderless).help("Show or Hide Chat History")
+            Text(chat.selected?.title ?? "New Chat").font(.headline).lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 12)
+            HStack(spacing: 6) {
+                Circle().fill(dot).frame(width: 7, height: 7)
+                Text(model).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            .buttonStyle(.borderless).padding(.horizontal, 14).padding(.vertical, 12)
-            .keyboardShortcut("n", modifiers: [.command, .shift])
-            .help("New Chat (⇧⌘N)")
-            Divider()
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(Capsule().fill(Color.primary.opacity(0.06)))
+            .frame(maxWidth: 260, alignment: .trailing)
+            .help(server.phase == .ready ? "The model answering this chat" : "Sending a message loads your default model")
+            Button { chat.newChat() } label: { Image(systemName: "square.and.pencil") }
+                .buttonStyle(.borderless).help("New Chat (⇧⌘N)")
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+        }
+        .font(.system(size: 14))
+        .padding(.horizontal, 16).frame(height: 44)
+    }
+
+    private var model: String {
+        switch server.phase {
+        case .ready: return server.record?.modelName ?? "Model"
+        case .external: return "Server on port \(server.port)"
+        case .starting: return "Loading \(server.record?.modelName ?? "model")…"
+        default: return "No model loaded"
+        }
+    }
+
+    private var dot: Color {
+        switch server.phase {
+        case .ready, .external: return .green
+        case .starting: return .orange
+        default: return .secondary.opacity(0.5)
+        }
+    }
+}
+
+/// Past chats, newest first, grouped by when they were last used, with a search field.
+private struct ChatHistory: View {
+    @ObservedObject var chat: ChatStore
+    var picked: () -> Void = {}
+    @State private var query = ""
+    @State private var renaming: Conversation?
+    @State private var newTitle = ""
+    @State private var hovered: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.tertiary)
+                TextField("Search chats", text: $query).textFieldStyle(.plain)
+                if !query.isEmpty {
+                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.tertiary)
+                }
+            }
+            .font(.callout)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+            .padding(12)
             if chat.conversations.isEmpty {
-                Text("Your conversations appear here. They stay on this Mac.")
-                    .font(.caption).foregroundStyle(.secondary).padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                Text("Your chats appear here. They stay on this Mac.")
+                    .font(.callout).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.top, 4)
+                Spacer()
+            } else if groups.isEmpty {
+                Text("No chats match “\(query)”.").font(.callout).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.top, 4)
                 Spacer()
             } else {
-                List(selection: $chat.selectedID) {
-                    ForEach(chat.conversations) { conversation in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(conversation.title).lineLimit(1)
-                            Text(conversation.updated.formatted(.relative(presentation: .named)))
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 2)
-                        .tag(conversation.id)
-                        .contextMenu {
-                            Button("Rename…") { newTitle = conversation.title; renaming = conversation }
-                            Button("Delete", role: .destructive) { chat.delete(conversation.id) }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(groups, id: \.title) { group in
+                            Text(group.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                                .padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 4)
+                            ForEach(group.chats) { row($0) }
                         }
                     }
+                    .padding(.horizontal, 8).padding(.bottom, 12)
                 }
-                .listStyle(.sidebar)
             }
         }
         .alert("Rename Chat", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -58,6 +126,58 @@ private struct ConversationList: View {
             Button("Rename") { if let renaming { chat.rename(renaming.id, to: newTitle) }; renaming = nil }
             Button("Cancel", role: .cancel) { renaming = nil }
         }
+    }
+
+    private func row(_ conversation: Conversation) -> some View {
+        let selected = conversation.id == chat.selectedID
+        return Button {
+            chat.selectedID = conversation.id
+            picked()
+        } label: {
+            HStack(spacing: 6) {
+                Text(conversation.title).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 4)
+                if chat.generating == conversation.id { ProgressView().controlSize(.mini) }
+            }
+            .font(.callout)
+            .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.85))
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 7).fill(selected ? Color.accentColor.opacity(0.18)
+                                                               : hovered == conversation.id ? Color.primary.opacity(0.06) : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 ? conversation.id : (hovered == conversation.id ? nil : hovered) }
+        .contextMenu {
+            Button("Rename…") { newTitle = conversation.title; renaming = conversation }
+            Button("Delete", role: .destructive) { chat.delete(conversation.id) }
+        }
+    }
+
+    private var groups: [(title: String, chats: [Conversation])] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let matching = query.isEmpty ? chat.conversations : chat.conversations.filter {
+            $0.title.localizedCaseInsensitiveContains(query) || $0.messages.contains { $0.role == .user && $0.text.localizedCaseInsensitiveContains(query) }
+        }
+        func bucket(_ date: Date) -> String {
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: today).day ?? 0
+            switch days {
+            case ...0: return "Today"
+            case 1: return "Yesterday"
+            case 2...7: return "Previous 7 Days"
+            case 8...30: return "Previous 30 Days"
+            default: return "Older"
+            }
+        }
+        var order: [String] = []
+        var buckets: [String: [Conversation]] = [:]
+        for conversation in matching {
+            let key = bucket(conversation.updated)
+            if buckets[key] == nil { order.append(key) }
+            buckets[key, default: []].append(conversation)
+        }
+        return order.map { ($0, buckets[$0] ?? []) }
     }
 }
 
@@ -69,13 +189,20 @@ private struct ChatThread: View {
     @ObservedObject var store = AppStore.shared
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let conversation = chat.selected, !conversation.messages.isEmpty {
+        if let conversation = chat.selected, !conversation.messages.isEmpty {
+            VStack(spacing: 0) {
                 messages(conversation)
-            } else {
-                welcome
+                Composer(chat: chat)
             }
-            Composer(chat: chat)
+        } else {
+            // A new chat: the greeting and the message box sit together in the middle, as in ChatGPT and Claude.
+            VStack(spacing: 0) {
+                Spacer()
+                welcome
+                Composer(chat: chat).padding(.top, 18)
+                Spacer()
+                Spacer()
+            }
         }
     }
 
@@ -94,6 +221,13 @@ private struct ChatThread: View {
                                            isLast: !writing && message.id == lastAssistant, chat: chat)
                         }
                     }
+                    // A question left without an answer, say because the model stopped or the app quit while it wrote.
+                    if !writing, shown.last?.role == .user {
+                        HStack(spacing: 10) {
+                            Label("No reply.", systemImage: "exclamationmark.bubble").foregroundStyle(.secondary)
+                            Button("Retry") { chat.regenerate() }.disabled(chat.busy)
+                        }.font(.callout)
+                    }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .frame(maxWidth: 780)
@@ -110,10 +244,8 @@ private struct ChatThread: View {
     }
 
     private var welcome: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Image(systemName: "bubble.left.and.text.bubble.right").font(.system(size: 34)).foregroundStyle(.secondary)
-            Text("What can I help with?").font(.system(size: 26, weight: .semibold))
+        VStack(spacing: 12) {
+            Text("What can I help with?").font(.system(size: 28, weight: .semibold))
             Text(modelLine).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             if let launching = store.launching {
                 ProgressView(launching).controlSize(.small)
@@ -124,9 +256,8 @@ private struct ChatThread: View {
             } else if !server.running {
                 Button("Find a Model") { store.page = .discover }
             }
-            Spacer()
         }
-        .padding(28).frame(maxWidth: .infinity)
+        .padding(.horizontal, 28).frame(maxWidth: .infinity)
     }
 
     private var modelLine: String {

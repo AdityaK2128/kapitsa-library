@@ -133,10 +133,7 @@ private struct ServerCard: View {
                 Button("Logs") { store.showLog = true }
                 Button("Stop", role: .destructive) { server.stop() }.disabled(server.phase == .stopping)
             }
-            if server.phase == .ready || server.phase == .external {
-                Button("Open Chat") { NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(server.port)")!) }
-                    .buttonStyle(.borderedProminent)
-            } else if !server.running {
+            if !server.running {
                 Button("Choose Model…") { store.page = .models }
                 if let model = suggestion {
                     Button("Load Model") { store.load(model, context: model.contexts.contains(Prefs.lastContext) ? Prefs.lastContext : nil) }
